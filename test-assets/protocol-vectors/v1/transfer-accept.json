@@ -1,0 +1,1 @@
+{"protocol":"localdrop","protocolVersion":1,"type":"TRANSFER_ACCEPT","messageId":"55555555-5555-4555-8555-555555555555","correlationId":"33333333-3333-4333-8333-333333333333","sessionId":"22222222-2222-4222-8222-222222222222","transferId":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","payload":{"transferId":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","resumeOffset":0}}

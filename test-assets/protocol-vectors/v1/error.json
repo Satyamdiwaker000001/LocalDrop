@@ -1,0 +1,1 @@
+{"protocol":"localdrop","protocolVersion":1,"type":"ERROR","messageId":"44444444-4444-4444-8444-444444444444","payload":{"code":"TRANSFER_REJECTED","message":"Receiver declined the transfer"}}

@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>LocalDrop.Protocol.Tests</RootNamespace>
+    <!-- LocalDrop is a Windows-only product; the linked CNG identity store
+         is Windows-only by design. Suppress the resulting platform warning
+         in the test project (the net10.0-windows app project is unaffected). -->
+    <NoWarn>CA1416</NoWarn>
+  </PropertyGroup>
+
+  <!-- M02: protocol sources are linked, not duplicated. The Protocol/
+       folder remains the single implementation; this project only adds
+       test code. No production dependency change. -->
+  <ItemGroup>
+    <Using Include="Xunit" />
+    <Compile Include="..\LocalDrop\Protocol\*.cs" />
+    <Compile Include="..\LocalDrop\Discovery\*.cs" />
+    <Compile Include="..\LocalDrop\Network\Control*.cs" />
+    <Compile Include="..\LocalDrop\Transfer\*.cs" />
+    <Compile Include="..\LocalDrop\Security\*.cs" />
+    <Compile Include="..\LocalDrop\Storage\*.cs" />
+    <!-- MEL-backed production logger ships in the app only; the test
+         project links the dependency-free contract + recording sink. -->
+    <Compile Remove="..\LocalDrop\Security\SecurityLoggerBackend.cs" />
+    <Compile Include="..\LocalDrop\Core\AppConfig.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.13.0" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.9" />
+  </ItemGroup>
+
+</Project>

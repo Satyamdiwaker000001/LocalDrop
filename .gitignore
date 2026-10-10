@@ -1,0 +1,29 @@
+# Build / tooling
+.gradle/
+build/
+out/
+bin/
+obj/
+*.user
+*.suo
+.vs/
+local.properties
+*.ap_
+*.aab
+*.apk
+# IDE
+.idea/
+*.iml
+# OS
+.DS_Store
+Thumbs.db
+# .NET
+TestResults/
+# Logs / SQLite runtime artifacts (keep schema, ignore runtime db)
+*.log
+*.db
+*.db-shm
+*.db-wal
+# Temp
+tmp/
+temp/
