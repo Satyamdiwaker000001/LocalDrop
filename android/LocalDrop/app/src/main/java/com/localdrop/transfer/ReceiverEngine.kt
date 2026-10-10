@@ -145,6 +145,10 @@ class ReceiverEngine(
 
     fun activeTransferId(): String? = synchronized(gate) { actives.keys.firstOrNull() ?: pendings.keys.firstOrNull() }
 
+    // M13 service hook: authoritative live-transfer count (actives + pendings)
+    // for idle detection. Read-only, no state change.
+    fun liveTransferCount(): Int = synchronized(gate) { actives.size + pendings.size }
+
     fun localPort(): Int = synchronized(gate) { serverSocket?.localPort ?: -1 }
 
     // Bytes streamed so far by the active transfer (test/diagnostics hook).

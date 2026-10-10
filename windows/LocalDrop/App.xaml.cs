@@ -6,6 +6,7 @@
 using System.Windows;
 using LocalDrop.Core;
 using LocalDrop.Discovery;
+using LocalDrop.Infrastructure;
 using LocalDrop.Presentation;
 using LocalDrop.Security;
 using LocalDrop.Transfer;
@@ -18,6 +19,11 @@ public partial class App : System.Windows.Application
     public string LocalDeviceName { get; private set; } = "";
     private IDeviceIdentityStore? _identityStore;
     private LanDiscoveryService? _discovery;
+    private MainWindow? _window;
+    private WindowsTrayIcon? _tray;
+    // Set ONLY by the tray Exit path (after any busy confirmation). The
+    // window [X]/Alt+F4 path never sets it: close always hides to tray.
+    private bool _exitRequested;
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -37,7 +43,117 @@ public partial class App : System.Windows.Application
             return;
         }
         var window = new MainWindow { DataContext = Send };
+        _window = window;
+        window.StateChanged += OnWindowStateChanged;
+        window.Closing += OnWindowClosing;
+        Send.PropertyChanged += OnSendStateChanged;
+        _tray = new WindowsTrayIcon(OnTrayMenu);
+        _tray.Show();
+        RefreshTrayText();
         window.Show();
+    }
+
+    // Minimize button docks to the tray instead of the taskbar. The window
+    // is hidden (never closed), so live transfers keep running untouched.
+    private void OnWindowStateChanged(object? sender, EventArgs e)
+    {
+        try
+        {
+            if (_window is not null && _window.WindowState == WindowState.Minimized)
+                HideToTray();
+        }
+        catch { }
+    }
+
+    // [X]/Alt+F4 hides to the tray (TrayPolicy); only the tray Exit item
+    // (with _exitRequested set) is allowed to actually close the window and
+    // shut the application down.
+    private void OnWindowClosing(object? sender, System.ComponentModel.CancelEventArgs e)
+    {
+        try
+        {
+            if (TrayPolicy.ShouldHideToTrayOnClose(_exitRequested))
+            {
+                e.Cancel = true;
+                HideToTray();
+            }
+        }
+        catch { }
+    }
+
+    private void HideToTray()
+    {
+        if (_window is null) return;
+        _window.Hide();
+        _window.ShowInTaskbar = false;
+    }
+
+    private void RestoreWindow()
+    {
+        if (_window is null) return;
+        _window.Show();
+        _window.WindowState = WindowState.Normal;
+        _window.ShowInTaskbar = true;
+        try { _window.Activate(); } catch { }
+    }
+
+    private void OnTrayMenu(TrayMenuAction action)
+    {
+        switch (action)
+        {
+            case TrayMenuAction.Open:
+            case TrayMenuAction.ActiveTransfers:
+            case TrayMenuAction.Send:
+                // Single-window app: every open action restores the main
+                // window (which already contains Nearby Devices, Send, and
+                // Active Transfers). No new windows are invented.
+                Dispatcher.Invoke(RestoreWindow);
+                break;
+            case TrayMenuAction.Exit:
+                Dispatcher.Invoke(RequestExit);
+                break;
+        }
+    }
+
+    // The ONLY user-visible exit path. Busy (live send) exits confirm first
+    // because shutdown cooperatively cancels the transfer; idle exits do
+    // not prompt. Follows the documented shutdown policy in OnExit.
+    private void RequestExit()
+    {
+        try
+        {
+            if (Send is not null && TrayPolicy.ConfirmExitNeeded(Send.IsBusy))
+            {
+                var answer = MessageBox.Show(
+                    TrayPolicy.ExitConfirmText, TrayPolicy.ExitConfirmTitle,
+                    MessageBoxButton.YesNo, MessageBoxImage.Warning);
+                if (answer != MessageBoxResult.Yes) return;
+            }
+        }
+        catch { }
+        _exitRequested = true;
+        Shutdown();
+    }
+
+    private void OnSendStateChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName is nameof(SendController.IsBusy)
+            or nameof(SendController.Phase)
+            or nameof(SendController.FileName))
+        {
+            RefreshTrayText();
+        }
+    }
+
+    private void RefreshTrayText()
+    {
+        try
+        {
+            _tray?.UpdateText(Send is null
+                ? "LocalDrop"
+                : TrayPolicy.TooltipText(Send.IsBusy, Send.Phase, Send.FileName));
+        }
+        catch { }
     }
 
     private void StartLocalDrop()
@@ -95,6 +211,29 @@ public partial class App : System.Windows.Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        // Teardown order is deliberate: tray icon FIRST (Visible=false so no
+        // ghost icon lingers; handlers detached so nothing fires mid-exit),
+        // then the send stack (Send.Dispose cooperatively cancels a live
+        // send), then discovery sockets, then identity. Every Dispose/Stop
+        // is idempotent, so shutdown is effectively once. Fail-fast startup
+        // may exit before these exist: each is null-guarded, never NRE.
+        try
+        {
+            if (Send is not null)
+                Send.PropertyChanged -= OnSendStateChanged;
+        }
+        catch { }
+        try
+        {
+            if (_window is not null)
+            {
+                _window.StateChanged -= OnWindowStateChanged;
+                _window.Closing -= OnWindowClosing;
+            }
+        }
+        catch { }
+        try { _tray?.Dispose(); } catch { }
+        _tray = null;
         // Fail-fast startup may exit before Send exists: clean up each owned
         // resource explicitly (never rely on throwing/catching NRE). Every
         // Dispose/Stop below is idempotent, so shutdown is effectively once.

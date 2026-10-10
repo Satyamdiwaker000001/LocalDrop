@@ -2,7 +2,6 @@ package com.localdrop
 
 import android.content.ContentResolver
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
 import android.provider.OpenableColumns
 import androidx.activity.ComponentActivity
@@ -42,12 +41,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
-import com.localdrop.core.AppLogger
 import com.localdrop.discovery.DeviceInfo
-import com.localdrop.discovery.LanDiscovery
-import com.localdrop.protocol.Protocol
-import com.localdrop.security.AndroidKeyStoreDeviceIdentityStore
-import com.localdrop.security.AppSecurityLogger
 import com.localdrop.transfer.ContentUriTransferSource
 import com.localdrop.transfer.ReceiveCoordinator
 import com.localdrop.transfer.ReceivePhase
@@ -58,113 +52,233 @@ import com.localdrop.transfer.SendUiController
 import com.localdrop.transfer.TransferOutcome
 import com.localdrop.transfer.TransferProgress
 import com.localdrop.transfer.TransferSource
-import java.io.File
 
-// M07 UI closure: thin Compose screens over framework-free controllers.
-// Screens render state and dispatch user actions ONLY: no sockets, no file
-// I/O, no crypto, no orchestration here (UI/UX Spec §18). All transfer work
-// runs on controller/coordinator worker threads; progress and outcomes are
-// real engine events. No foreground service/widgets (M13) and no fake
-// Verified state (M11 owns integrity verification).
+// M13 bidirectional audit: thin Compose screens over framework-free
+// controllers bound to the service-owned graph. Screens render state and
+// dispatch user actions ONLY: no sockets, no file I/O, no crypto, no
+// orchestration here (UI/UX Spec §18). All transfer work runs service-side
+// (OutgoingTransfers worker threads + coordinators); progress and outcomes
+// are real engine events. No fake Verified state (M11 owns integrity
+// verification).
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val viewModel = androidx.lifecycle.ViewModelProvider(this)[AppStackViewModel::class.java]
-        val stack: AppStack = try {
-            viewModel.stack
-        } catch (e: Exception) {
-            setContent {
-                MaterialTheme {
-                    Surface(modifier = Modifier.fillMaxSize()) {
-                        Column(modifier = Modifier.padding(24.dp)) {
-                            Text("LocalDrop", style = MaterialTheme.typography.headlineSmall)
-                            Spacer(Modifier.height(8.dp))
-                            Text("Could not open this device's identity. Reinstalling the app resets it.")
-                        }
-                    }
-                }
-            }
-            return
-        }
         setContent {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    LocalDropApp(stack)
+                    val ready by viewModel.uiReady
+                    val error by viewModel.uiError
+                    when {
+                        error != null -> Column(modifier = Modifier.padding(24.dp)) {
+                            Text("LocalDrop", style = MaterialTheme.typography.headlineSmall)
+                            Spacer(Modifier.height(8.dp))
+                            Text(error!!)
+                        }
+                        ready -> {
+                            val stack = viewModel.stack
+                            if (stack != null) LocalDropApp(stack)
+                            else Text("Starting LocalDrop…", modifier = Modifier.padding(24.dp))
+                        }
+                        else -> Text("Starting LocalDrop…", modifier = Modifier.padding(24.dp))
+                    }
                 }
             }
         }
     }
 
-    // Production object graph. Plain holder (no ViewModel dependency);
-    // the composable owns its lifetime via DisposableEffect and closes it
-    // on dispose. Takes only ContentResolver + files dir (testable seam:
-    // no Activity reference retained).
-    class AppStack(resolver: ContentResolver, filesDir: File) {
+    // Production object graph — SERVICE-BOUND (M13 bidirectional audit).
+    // Owns NO engines, NO discovery, NO sockets: SendCoordinator,
+    // ReceiveCoordinator, OutgoingTransfers, and the Room DAO all live in
+    // the bound TransferService. The UI controllers only render state and
+    // submit work service-side. Constructed after bind; torn down with
+    // release() (detach-only), never by stopping the service graph.
+    //
+    // M10 resume + M05 auth + M11 SHA-256 + M12 isolation stay connected:
+    // this holder changes no auth/session/verify/concurrency logic; it only
+    // routes through the service-owned persistent checkpoint implementation
+    // (getCheckpointAndMigrate / saveCheckpoint / clearCheckpoint).
+    class AppStack(
+        resolver: ContentResolver,
+        val service: com.localdrop.service.TransferService
+    ) {
         val contentResolver: ContentResolver = resolver
-        private val appLogger = object : AppLogger {
-            override fun d(tag: String, message: String) = Unit
-            override fun i(tag: String, message: String) = Unit
-            override fun w(tag: String, message: String) = Unit
-            override fun e(tag: String, message: String, throwable: Throwable?) = Unit
-        }
-        private val logger = AppSecurityLogger(appLogger)
-        private val store = AndroidKeyStoreDeviceIdentityStore()
-        val device: DeviceInfo
-        val destDir: File
-        val sendDiscovery: LanDiscovery
-        val sendCoordinator: SendCoordinator
+        val device: DeviceInfo = service.device
+            ?: throw IllegalStateException("Service has no device identity.")
+        val sendCoordinator: SendCoordinator = service.sendCoordinator
+            ?: throw IllegalStateException("Service has no send coordinator.")
+        val receiveCoordinator: ReceiveCoordinator = service.receiveCoordinator
+            ?: throw IllegalStateException("Service has no receive coordinator.")
+        val outgoing: com.localdrop.service.OutgoingTransfers = service.outgoing
+            ?: throw IllegalStateException("Service has no outgoing tracker.")
         val send: SendUiController
-        val receiveCoordinator: ReceiveCoordinator
         val receive: ReceiveUiController
+        // Non-null when the persistent checkpoint store failed to open:
+        // resume is then DISABLED and the UI must say so (never silent).
+        val databaseFailure: Exception? = service.databaseFailure
 
         init {
-            val rawName = Build.MODEL?.takeIf { it.isNotBlank() } ?: "Android device"
-            val name = rawName.take(Protocol.MAX_DEVICE_NAME)
-            device = DeviceInfo(store.identity().deviceId, name, "android")
-            destDir = File(filesDir, "LocalDrop").apply { mkdirs() }
-            sendDiscovery = LanDiscovery(device)
-            sendCoordinator = SendCoordinator(device, store, logger, sendDiscovery)
             val facade = object : SendUiController.SendCoordinatorFacade {
                 override fun nearbyPeers() = sendCoordinator.nearbyPeers()
                 override fun sendFile(
                     peerDeviceId: String, source: TransferSource, code: String,
                     isCancelled: () -> Boolean, onProgress: (TransferProgress) -> Unit
-                ): TransferOutcome =
-                    sendCoordinator.sendFile(peerDeviceId, source, code, isCancelled, onProgress)
+                ): TransferOutcome {
+                    // Service-owned execution: tracked under a handle (exact
+                    // per-send cancel + notifications + widget rows). The UI
+                    // cancel flag is wired as externalCancel so the on-screen
+                    // Cancel button aborts through the same cooperative path.
+                    // UI destruction does NOT cancel: release() detaches the
+                    // observer while the service-side send runs to completion.
+                    val handle = outgoing.startSend(
+                        peerDeviceId, source, code,
+                        onProgress = { p ->
+                            try { onProgress(p) } catch (e: Exception) { }
+                        },
+                        externalCancel = isCancelled)
+                        ?: return TransferOutcome.Failed(
+                            null, com.localdrop.protocol.ErrorCode.TRANSFER_REJECTED,
+                            "Too many concurrent sends. Wait for one to finish and try again.")
+                    return outgoing.awaitOutcome(handle.id, SEND_AWAIT_TIMEOUT_MS)
+                        ?: TransferOutcome.Failed(
+                            null, com.localdrop.protocol.ErrorCode.TIMEOUT,
+                            "Send did not finish in time.")
+                }
             }
             send = SendUiController(facade)
-            receiveCoordinator = ReceiveCoordinator(device, store, logger, destDir)
             receive = ReceiveUiController(receiveCoordinator)
+        }
+
+        // Visible resume-status note: null when resume is armed, non-null
+        // text explaining the disabled-resume state when Room init failed.
+        fun databaseFailureNote(): String? =
+            com.localdrop.service.CheckpointStore.failureNote(databaseFailure)
+
+        companion object {
+            // Upper bound for one UI-awaited send (sends are cooperative and
+            // cancellable; this only bounds a stuck wait, never a transfer).
+            const val SEND_AWAIT_TIMEOUT_MS: Long = 6L * 3600L * 1000L
         }
     }
 
     class AppStackViewModel(application: android.app.Application) : androidx.lifecycle.AndroidViewModel(application) {
-        val stack: AppStack by lazy { AppStack(application.contentResolver, application.filesDir) }
-        private val starter: Thread
-        private val poller: Thread
+        // M13 bidirectional audit: the ViewModel NEVER owns engines,
+        // discovery, or transfers. It starts + binds the service (sole
+        // owner), builds UI-only controllers over the bound coordinators,
+        // and on teardown DETACHES (release()) without stopping or
+        // cancelling anything service-side. In-flight sends and receives
+        // survive ViewModel/Activity destruction; only the service's
+        // onDestroy stops the graph.
+        val uiReady = androidx.compose.runtime.mutableStateOf(false)
+        val uiError = androidx.compose.runtime.mutableStateOf<String?>(null)
+        var stack: AppStack? = null
+            private set
+        private var poller: Thread? = null
+        private var connection: android.content.ServiceConnection? = null
+        @Volatile private var bound = false
+        @Volatile private var tornDown = false
 
         init {
-            starter = Thread({
-                try { stack.sendCoordinator.start() } catch (e: Exception) { }
-                try { stack.receive.start() } catch (e: Exception) { }
-                stack.receive.attachProgress()
-            }, "localdrop-ui-start").apply { isDaemon = true; start() }
-            poller = Thread({
+            val app = getApplication<android.app.Application>()
+            try {
+                app.startService(android.content.Intent(app, com.localdrop.service.TransferService::class.java))
+            } catch (e: Exception) {
+                uiError.value = "Could not start the background service: ${e.message}"
+            }
+            if (uiError.value == null) {
+                val conn = object : android.content.ServiceConnection {
+                    override fun onServiceConnected(
+                        name: android.content.ComponentName?,
+                        binder: android.os.IBinder?
+                    ) {
+                        try {
+                            val service = (binder as com.localdrop.service.TransferService.LocalBinder).service()
+                            val created = AppStack(app.contentResolver, service)
+                            synchronized(this@AppStackViewModel) {
+                                if (tornDown) return
+                                stack = created
+                            }
+                            created.receive.start()
+                            created.receive.attachProgress()
+                            startPoller(created)
+                            uiReady.value = true
+                        } catch (e: Exception) {
+                            uiError.value = "Could not open this device's identity. Reinstalling the app resets it."
+                        }
+                    }
+
+                    override fun onServiceDisconnected(name: android.content.ComponentName?) {
+                        // Framework rebind path only; the service process is
+                        // the owner and decides its own fate.
+                    }
+                }
+                connection = conn
+                val ok = try {
+                    app.bindService(
+                        android.content.Intent(app, com.localdrop.service.TransferService::class.java),
+                        conn, android.content.Context.BIND_AUTO_CREATE)
+                } catch (e: Exception) {
+                    false
+                }
+                if (!ok) {
+                    uiError.value = "Could not connect to the background service."
+                } else {
+                    bound = true
+                    Thread({
+                        try { Thread.sleep(SERVICE_BIND_TIMEOUT_MS) } catch (e: InterruptedException) { return@Thread }
+                        synchronized(this@AppStackViewModel) {
+                            if (stack == null && uiError.value == null) {
+                                uiError.value = "Could not connect to the background service. " +
+                                    "If this persists, reinstalling the app resets its identity."
+                            }
+                        }
+                    }, "localdrop-bind-watchdog").apply { isDaemon = true; start() }
+                }
+            }
+        }
+
+        private fun startPoller(created: AppStack) {
+            val t = Thread({
                 while (!Thread.currentThread().isInterrupted) {
-                    try { stack.send.refreshPeers() } catch (e: Exception) { }
+                    try { created.send.refreshPeers() } catch (e: Exception) { }
                     try { Thread.sleep(2000) } catch (e: InterruptedException) { break }
                 }
             }, "localdrop-ui-poll").apply { isDaemon = true; start() }
+            synchronized(this) { poller = t }
         }
 
         override fun onCleared() {
             super.onCleared()
-            try { poller.interrupt() } catch (e: Exception) { }
-            try { stack.send.close() } catch (e: Exception) { }
-            try { stack.receive.close() } catch (e: Exception) { }
-            try { stack.sendCoordinator.stop() } catch (e: Exception) { }
-            try { starter.join(3000) } catch (e: Exception) { }
-            try { poller.join(3000) } catch (e: Exception) { }
+            val s: AppStack?
+            val p: Thread?
+            synchronized(this) {
+                tornDown = true
+                s = stack
+                stack = null
+                p = poller
+                poller = null
+            }
+            try { p?.interrupt() } catch (e: Exception) { }
+            // Detach ONLY: never stop coordinators, never cancel transfers,
+            // never stop the service. Live sends/receives continue
+            // service-side (notifications + widgets stay authoritative).
+            try { s?.send?.release() } catch (e: Exception) { }
+            try { s?.receive?.release() } catch (e: Exception) { }
+            try { p?.join(3000) } catch (e: Exception) { }
+            try {
+                val conn = connection
+                if (bound && conn != null) {
+                    try { getApplication<android.app.Application>().unbindService(conn) } catch (e: Exception) { }
+                }
+            } catch (e: Exception) { }
+            // NOTE: no stopService here by design — the foreground service
+            // persists (discoverable receiver + tracked sends) until the
+            // user or system stops it. JVM-testable invariant: after this
+            // teardown the service graph is still running (see UiDestructionTest).
+        }
+
+        companion object {
+            const val SERVICE_BIND_TIMEOUT_MS = 15000L
         }
     }
 }

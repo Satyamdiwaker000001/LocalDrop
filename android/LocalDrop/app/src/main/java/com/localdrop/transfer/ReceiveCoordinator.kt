@@ -29,6 +29,7 @@ class ReceiveCoordinator(
     private val store: DeviceIdentityStore,
     private val logger: SecurityLogger = RecordingSecurityLogger(),
     private val destDir: File,
+    private val checkpoints: com.localdrop.storage.CheckpointDao? = null,
     private val controlPort: Int = AppConfig.CONTROL_TCP_PORT,
     private val dataPort: Int = AppConfig.DATA_TCP_PORT,
     private val discoveryPort: Int = AppConfig.DISCOVERY_UDP_PORT,
@@ -45,7 +46,7 @@ class ReceiveCoordinator(
     val discovery: LanDiscovery
 
     init {
-        engine = ReceiverEngine(local, serverAuth, sessions, destDir, logger = logger, dataPort = dataPort)
+        engine = ReceiverEngine(local, serverAuth, sessions, destDir, checkpoints, logger = logger, dataPort = dataPort)
         val handler = engine.createHandler()
         val authorizer = TransactionAuthorizer(
             serverAuth, transactions, sessions, logger, local.deviceId, handler)

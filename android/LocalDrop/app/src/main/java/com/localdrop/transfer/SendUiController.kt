@@ -68,6 +68,7 @@ class SendUiController(
     private var cancelled = false
     private var worker: Thread? = null
     private var closed = false
+    private var detached = false
 
     private fun update(next: SendUiState) {
         state = next
@@ -140,7 +141,7 @@ class SendUiController(
     fun startSend(): Boolean {
         val req: Triple<String, TransferSource, String>
         synchronized(gate) {
-            if (closed || state.busy) return false
+            if (closed || detached || state.busy) return false
             val src = source
             val peerId = state.selectedPeerId
             if (src == null || peerId == null) {
@@ -243,6 +244,20 @@ class SendUiController(
         }
         try { w?.join(3000) } catch (e: InterruptedException) {
             Thread.currentThread().interrupt()
+        }
+    }
+
+    // M13 bidirectional audit: UI-detach for the service-owned path. Drops
+    // the observer and blocks NEW sends from this (discarded) controller,
+    // but does NOT cancel an in-flight send and does NOT join the worker:
+    // the send is service-owned and runs to its terminal outcome (tracked
+    // by OutgoingTransfers + notifications) even though this UI is gone.
+    // close() above stays for standalone/test use (cancel + join).
+    fun release() {
+        synchronized(gate) {
+            if (closed || detached) return
+            detached = true
+            onChange = {}
         }
     }
 

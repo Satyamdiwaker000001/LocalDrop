@@ -37,6 +37,7 @@ class ReceiveUiController(private val coordinator: ReceiveCoordinator) {
     var onChange: () -> Unit = {}
     private var worker: Thread? = null
     private var closed = false
+    private var released = false
 
     private fun update(next: ReceiveUiState) {
         state = next
@@ -45,7 +46,7 @@ class ReceiveUiController(private val coordinator: ReceiveCoordinator) {
 
     fun start() {
         synchronized(gate) {
-            if (closed || state.running) return
+            if (closed || released || state.running) return
             update(state.copy(running = true, statusText = "Receiving is on. Nearby senders can find this device."))
             worker = Thread({
                 try {
@@ -62,14 +63,14 @@ class ReceiveUiController(private val coordinator: ReceiveCoordinator) {
                 // Outcome feed: terminal outcomes drive the result display.
                 // waitForAnyOutcome returns real engine outcomes only.
                 while (true) {
-                    synchronized(gate) { if (closed) return@Thread }
+                    synchronized(gate) { if (closed || released) return@Thread }
                     val outcome = try {
                         coordinator.waitForAnyOutcome(2000)
                     } catch (e: Exception) {
                         null
                     }
                     synchronized(gate) {
-                        if (closed) return@Thread
+                        if (closed || released) return@Thread
                         refreshIncomingLocked()
                         if (outcome != null) applyOutcomeLocked(outcome)
                     }
@@ -83,7 +84,7 @@ class ReceiveUiController(private val coordinator: ReceiveCoordinator) {
     // rules; this never approves anything by itself.
     fun newCode() {
         synchronized(gate) {
-            if (closed || !state.running) {
+            if (closed || released || !state.running) {
                 update(state.copy(resultText = "Start receiving first."))
                 return
             }
@@ -185,7 +186,30 @@ class ReceiveUiController(private val coordinator: ReceiveCoordinator) {
         }
         // Stopping the coordinator aborts any active inbound transfer
         // cooperatively (temp cleaned); the outcome feed reports it.
+        // Standalone/test teardown only — the service-owned UI path must
+        // call release(), never this (the service owns the coordinator).
         try { coordinator.stop() } catch (e: Exception) { }
+        try { w?.join(5000) } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+    }
+
+    // M13 bidirectional audit: UI-detach for the service-owned path. Drops
+    // the observer, detaches engine progress, and exits the outcome-feed
+    // worker WITHOUT stopping the coordinator and WITHOUT aborting live
+    // inbound transfers: receiving continues service-side after this UI is
+    // gone. New actions (start/newCode) are blocked after release.
+    fun release() {
+        val w: Thread?
+        synchronized(gate) {
+            if (closed || released) return
+            released = true
+            onChange = {}
+            try { coordinator.engine.onProgress = null } catch (e: Exception) { }
+            w = worker
+            worker = null
+        }
+        try { w?.interrupt() } catch (e: Exception) { }
         try { w?.join(5000) } catch (e: InterruptedException) {
             Thread.currentThread().interrupt()
         }

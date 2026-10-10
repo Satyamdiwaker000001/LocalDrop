@@ -4,10 +4,18 @@
 
     <!-- M03: INTERNET is required for LAN UDP sockets (Android treats all
          socket use, including localhost/LAN UDP broadcast, as INTERNET).
-         Normal install-time permission, no runtime prompt. This is the ONLY
-         M03 permission: no location (no Wi-Fi scan), no multicast lock
-         (broadcast, not multicast), no background-service permission (M13). -->
+         Normal install-time permission, no runtime prompt. No location
+         (no Wi-Fi scan), no multicast lock (broadcast, not multicast).
+         Foreground-service permissions below arrived with M13. -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- M13 service-owned graph: foreground-service permissions for the
+         dataSync transfer service (targetSdk 36). FOREGROUND_SERVICE is the
+         base grant; FOREGROUND_SERVICE_DATA_SYNC authorizes the declared
+         dataSync type. POST_NOTIFICATIONS (API 33+) gates notification
+         display at runtime (requested by the UI, not the service). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:label="LocalDrop"
@@ -17,18 +25,38 @@
             android:name=".MainActivity"
             android:exported="true"
             android:configChanges="keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize">
-            <!-- configChanges (M07 closure): rotation/resize must NOT destroy
-                 the Activity. The transfer stacks (coordinators, controllers,
-                 worker threads) are owned per-Activity; recreation would
-                 cancel an active transfer via close(). Handling the change
-                 keeps the real transfer alive across rotation with no second
-                 source of truth and no new dependency. Compose recomposes the
-                 same state; process-death recovery stays out of scope (M10+).
-                 No foreground service/notification/widget change (M13). -->
+            <!-- configChanges: rotation/resize must NOT destroy the Activity.
+                 The transfer stacks are service-owned (TransferService);
+                 the Activity only binds to observe/submit. Handling the
+                 change avoids a redundant rebind; even without it,
+                 recreation re-binds to the same graph and cancels nothing.
+                 Compose recomposes the same state; process-death recovery
+                 stays out of scope. -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- M13: service-owned transfer graph. dataSync is the foreground
+             type whose documented purpose is data transfer. exported=false:
+             only this app starts/binds. Platform limits (documented in the
+             service + m13 decisions doc, NOT claimed unlimited): the service
+             must call startForeground within the system timeout; background
+             starts are restricted; Doze/App Standby defer network; the user
+             or system may stop the service at any time. -->
+        <service
+            android:name=".service.TransferService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+        <receiver
+            android:name=".widget.TransferWidgetProvider"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/transfer_widget_info" />
+        </receiver>
     </application>
 </manifest>

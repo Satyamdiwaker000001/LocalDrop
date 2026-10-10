@@ -1,6 +1,10 @@
 <Application x:Class="LocalDrop.App"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             ShutdownMode="OnExplicitShutdown">
     <!-- M07 UI closure: MainWindow is created in App.OnStartup with the
-         SendController as its DataContext (StartupUri removed). -->
+         SendController as its DataContext (StartupUri removed).
+         M14: OnExplicitShutdown — closing/minimizing the window hides it to
+         the tray; only the tray Exit item (after any transfer-busy
+         confirmation) calls Shutdown(). -->
 </Application>
