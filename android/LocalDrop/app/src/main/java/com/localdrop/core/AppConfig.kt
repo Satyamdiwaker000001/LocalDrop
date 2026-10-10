@@ -111,4 +111,14 @@ object AppConfig {
     // Data-plane preamble cap: 36-char UUID + '\n' is 37 bytes; larger input
     // is rejected without parsing (see data-transfer.md).
     const val DATA_PREAMBLE_MAX_BYTES = 64
+
+    // M13 service-owned graph (docs/architecture/m13-service-decisions.md).
+    // Notification channel for transfer notifications.
+    const val NOTIFICATION_CHANNEL_ID = "localdrop_transfers"
+    // Foreground summary notification ID (stable; per-transfer IDs come from
+    // NotificationIds, never from transferId.hashCode()).
+    const val NOTIFICATION_SUMMARY_ID = 1
+    // Widget snapshot older than this is rendered as idle (stale active
+    // transfers are never presented as current).
+    const val WIDGET_STALE_AFTER_MS: Long = 60000L
 }

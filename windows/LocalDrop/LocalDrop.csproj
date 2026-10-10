@@ -6,11 +6,23 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
+    <!-- M14: WinForms NotifyIcon interop for the system tray icon. In-box
+         framework assembly (no new package; offline-safe). -->
+    <UseWindowsForms>true</UseWindowsForms>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <AssemblyName>LocalDrop</AssemblyName>
     <RootNamespace>LocalDrop</RootNamespace>
     <Version>0.1.0-m01</Version>
   </PropertyGroup>
+
+  <!-- M14: UseWindowsForms adds an implicit `using System.Windows.Forms`
+       whose CloseReason collides with LocalDrop.Network.CloseReason in the
+       transfer/security sources. Remove the implicit using project-wide;
+       the tray adapter (WindowsTrayIcon.cs) references WinForms explicitly.
+       No production logic file is touched. -->
+  <ItemGroup>
+    <Using Remove="System.Windows.Forms" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Logging" Version="9.0.9" />

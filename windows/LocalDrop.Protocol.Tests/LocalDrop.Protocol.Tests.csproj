@@ -21,6 +21,10 @@
     <Compile Include="..\LocalDrop\Discovery\*.cs" />
     <Compile Include="..\LocalDrop\Network\Control*.cs" />
     <Compile Include="..\LocalDrop\Transfer\*.cs" />
+    <!-- M14: pure tray policy is linked for headless unit tests. The WinForms
+         NotifyIcon adapter (WindowsTrayIcon) is UI-thread/desktop-only and
+         stays in the app project (see Compile Remove pattern below). -->
+    <Compile Include="..\LocalDrop\Infrastructure\TrayPolicy.cs" />
     <Compile Include="..\LocalDrop\Security\*.cs" />
     <Compile Include="..\LocalDrop\Storage\*.cs" />
     <!-- MEL-backed production logger ships in the app only; the test

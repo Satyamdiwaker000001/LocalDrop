@@ -996,3 +996,274 @@ Windows `ReceiverEngineTests` (20 tests) evidences the same matrix:
   shutdown matrix, 28 Android + M12 Windows subset, all green).
 - Physical multi-device testing: NOT RUN (no hardware; remains M16 per directive).
 - STOP after M12. M13 NOT started. No UI redesign undertaken.
+
+# M13 Appendix -- Service-Owned Transfer Graph (2026-10-10)
+
+## Status: CLOSED -- review requirements evidenced below, M14 NOT started
+
+### 1. Service ownership (lifecycle documented, duplicate-init proven impossible)
+- Owner is `TransferService` (new), NOT any Activity: control server + data
+  engine + discovery loop + checkpoint DAO live in the service-owned
+  `TransferGraph`. Activities bind only to observe snapshots; `onBind`
+  starts nothing, `onUnbind` stops nothing. Exact start/bind/unbind/stop
+  semantics are documented in `TransferService.kt` header + `TransferGraph.kt`
+  header + `docs/architecture/m13-service-decisions.md` (ADRs 1-4).
+- `TransferGraph` (framework-free, JVM-tested): start is idempotent and
+  ordered (control -> data -> discovery); stop is idempotent and reversed;
+  repeated starts create no duplicate engines/listeners/loops/workers
+  (proven: `startCount == 1` after 3x start, per-component starts == 1).
+- Partial-init rollback: a failing mid start stops already-started
+  components in reverse, `running` stays false, the exception propagates
+  (service then `stopSelf()`; never a half-running service). Recovery start
+  afterwards succeeds (tested).
+- Zero active transfers: graph KEEPS listening (idle != stopped); service
+  drops foreground status via `onTransfersIdle()` and cancels per-transfer
+  notifications. Only explicit stop/`onDestroy()` shuts listeners down.
+- Activity recreation re-binds to the same graph instance (no engine/
+  listener/worker churn). `ReceiverEngine.liveTransferCount()` added as the
+  authoritative idle signal (read-only, no behavior change).
+
+### 2. Notification IDs (hashCode eliminated, exact routing tested)
+- New `NotificationIds` registry: stable monotonic integer per transferId,
+  `release()` returns exactly the issued ID (unknown IDs cancel nothing).
+  `transferId.hashCode()` is never used (proven premise in test:
+  `"Aa".hashCode() == "BB".hashCode()` yet they get distinct IDs).
+- Service summary uses fixed ID 1; dynamics start at 1000. No other
+  production code maps transferIds to ints (audited: no `hashCode()`-as-id
+  remains in `app/src/main`).
+
+### 3. Platform compatibility (verified vs targetSdk 36, limits documented)
+- Type `dataSync` declared on the service (`android:foregroundServiceType=
+  "dataSync"`) with `FOREGROUND_SERVICE` + `FOREGROUND_SERVICE_DATA_SYNC`
+  permissions; `POST_NOTIFICATIONS` (API 33+ runtime) declared. targetSdk 36
+  / minSdk 26 confirmed in `app/build.gradle.kts`. `assembleDebug` packages
+  the manifest (BUILD SUCCESSFUL; APK rebuilt 2026-10-10).
+- dataSync is correct: its documented purpose is data transfer; no other
+  type fits a LAN file transfer. API-34+ requires the type+permission pair
+  (else `startForeground` throws); the service fails loudly on promotion
+  failure (stops graph, propagates) rather than running silently unforegrounded.
+- Limits documented in code + decisions doc (ADR-7), NOT unlimited: FGS
+  start timeout after `startForegroundService`, background-start
+  restrictions, Doze/App Standby deferral, user/system may stop anytime.
+- Emulator/physical-device lifecycle verification: NOT RUN (no device or
+  emulator in this environment). Stated as NOT RUN, not inferred.
+
+### 4. Canonical widget state (authoritative snapshots, stale-safe, no polling)
+- New `TransferWidgetSnapshot` (epoch + generation + entries) and thin
+  `TransferWidgetProvider`: renders only `displayable()` snapshots; stale
+  (>60 s) active rows render as idle; fresh process with no push renders
+  idle (never resurrects pre-kill "transferring"). `updatePeriodMillis=0`
+  (no poll loop); refreshes are transition-driven by the service.
+- Widget encoding round-trip + hostile fileName (separator smuggling)
+  rejection tested.
+
+### 5. M10 resume integration (Room wired into the real receive path)
+- `ReceiveCoordinator` now takes `CheckpointDao` and hands it to
+  `ReceiverEngine` (which already calls `getCheckpointAndMigrate` /
+  `saveCheckpoint` / `clearCheckpoint`). `AppStackViewModel` supplies the
+  real Room DAO (`Room.databaseBuilder(...).checkpointDao()`); the
+  `TransferService.onCreate()` builds the identical graph.
+- Init goes through `CheckpointStore.resolve()`: `(dao=null, failure=e)`
+  on Room failure, and `failureNote()` user-visible text ("Resume
+  unavailable...") is surfaced instead of silently disabling resume.
+- `CheckpointWiringTest` (JVM + loopback, real M04/M05/engine stack) proves:
+  the graph supplies a non-null persistent dao; seeded checkpoint honored
+  (ACCEPT at confirmed offset); over-claim rejected (TRANSFER_REJECT);
+  resume honored across TWO receiver recreations with the same store;
+  `resolve()` failure is loud (`failureNote()` contains "Resume
+  unavailable"); code-less sender rejected (TRANSFER_REJECT) through the
+  wired graph.
+- Test bugs found honestly during development and fixed (not hidden): (a)
+  engine refusals arrive as TRANSFER_REJECT, not ERROR -- await set
+  corrected; (b) per-setup fresh device IDs break cross-recreation lookup
+  -- sender store now stable across incarnations (the realistic topology).
+
+### 6. Preserved behavior (M05/M10/M11/M12 connected through the graph)
+- No changes to auth/session/authorization ordering, checkpoint rules,
+  SHA-256 verification, or multi-session isolation (diff: wiring +
+  accessors only). Full pre-existing suites green (see evidence); wiring
+  test additionally proves code-less rejection + offset enforcement.
+- Windows: zero files changed (`git status` shows Android + docs only);
+  260/260 green.
+
+### 7. Evidence (sequential runs, exact commands/results; JVM vs device split)
+- `.\gradlew.bat :app:testDebugUnitTest --offline` (JVM unit + loopback):
+  exit 0, BUILD SUCCESSFUL. 230 tests / 0 failures / 0 errors / 0 skipped
+  (30 classes: 212 pre-existing + 18 new M13: NotificationIds 4,
+  TransferGraph 6, WidgetState 5, CheckpointWiring 3).
+- `.\gradlew.bat :app:assembleDebug --offline`: exit 0, BUILD SUCCESSFUL
+  (only frozen AGP compileSdk-36 + SDK-XML notices). APK rebuilt.
+- `dotnet build windows/LocalDrop.sln -c Debug`: 0 errors; only frozen
+  NU1903 x2.
+- `dotnet test windows/LocalDrop.sln -c Debug`: first two runs 259/260
+  with `LargeFileAcceptanceTests.Transfer_VariousSizes(100MB)` failing
+  (TransportComplete expected, Failed actual); the same test passes 5/5 in
+  isolation (`--filter ...LargeFileAcceptanceTests`) and the full suite
+  passes 260/260 on rerun. Zero Windows files in the M13 diff, so this is
+  a full-suite load interaction matching the recorded M07/M12 flake
+  pattern -- reported, not hidden, no assertion weakened.
+- Android instrumentation / emulator / physical-device tests: NOT RUN
+  (JVM + loopback only; no device/emulator available). Lifecycle behavior
+  is NOT labeled physically verified.
+- STOP after M13. M14 NOT started.
+
+# M13 Bidirectional Lifecycle Audit Appendix (2026-10-10, no-emulator workflow)
+
+## 0. Workflow constraint honored
+- VS Code + command-line Android SDK only. No Android Studio installed or
+  required; no emulator installed or required. Emulator tests: NOT RUN.
+  Physical-device tests: NOT RUN (developer did not run any in this task).
+
+## 1. Ownership audit against actual code (gap found and fixed)
+- BEFORE: incoming was service-built (`TransferService.onCreate` made a
+  `ReceiveCoordinator` + 3-component graph) but unreachable dead code
+  (nothing called `startService`/`bindService`); outgoing was
+  ViewModel-owned (`MainActivity.AppStack` built `LanDiscovery` +
+  `SendCoordinator`; `AppStackViewModel` started/stopped them;
+  `SendUiController.close()` set `cancelled=true`, so ViewModel destruction
+  actively cancelled in-flight sends). Code refs (pre-fix):
+  `MainActivity.kt` AppStack init + `AppStackViewModel.onCleared`
+  (`sendCoordinator.stop()`, `send.close()`, `receive.close()`).
+- AFTER (architectural gap fixed before closure): `TransferService` owns
+  BOTH directions — `TransferGraph` generalized to an ordered component
+  list carrying control + data + receive-discovery + send-discovery; new
+  `OutgoingTransfers` runs every `SendCoordinator.sendFile` on tracked
+  service daemon threads (cap 4 like M12, per-send cancel flags, UI-cancel
+  via `externalCancel`, `shutdown()` cancels + joins). `MainActivity`
+  does `startService` + `BIND_AUTO_CREATE` + 15 s watchdog, builds UI-only
+  controllers over bound coordinators; `AppStackViewModel.onCleared`
+  unbinds + `release()`s only — never stops coordinators/graph/service,
+  never cancels transfers. Service merges outbound rows into
+  `widgetSnapshot()` and drives per-transfer notifications from outgoing
+  transition feeds (1/s throttle; terminal outcomes cancel exactly that ID).
+- New `release()` (detach-only) on both UI controllers; `close()` keeps
+  standalone cancel+stop semantics for tests. Manifest activity comment
+  updated (service-owned; recreation re-binds, cancels nothing).
+
+## 2. New deterministic JVM/unit tests (16 tests, all green)
+- `ServiceOwnsBothDirectionsTest` (5): 4-component duplicate starts = 1
+  init each; reverse-order stop incl. send-discovery, idempotent;
+  aggregated active count; 4-component partial-rollback + recovery.
+- `OutgoingTransfersTest` (8): concurrent dual completion; cancel-one
+  isolation; unknown/settled cancel touches nothing; capacity reject +
+  slot-freed accept; externalCancel path; shutdown settles all (idempotent);
+  pre-decided outcome + named progress rows; sender-exception maps to
+  Failed (never hangs).
+- `UiDestructionTest` (3): send-`release()` lets the service-side send
+  succeed + blocks new sends; send-`close()` still cancels (unchanged);
+  real ephemeral-port `ReceiveCoordinator` ACCEPT-pending survives
+  receive-`release()` (live slot + bound port intact, `newCode` blocked)
+  and settles Cancelled only at graph `stop()`; duplicate graph starts on
+  real components = 1 init.
+- Test bugs fixed honestly: `assertEquals(1, done.count)` Int-vs-Long
+  overload never equal (now `0L`); capacity test raced cancel-vs-publish
+  (now awaits terminal first); `close()` drops late outcomes by design
+  (assertion moved to sender-observed cancel).
+
+## 3. Sequential evidence (exact commands, all --offline, JVM vs device split)
+- `.\gradlew.bat :app:cleanTestDebugUnitTest :app:testDebugUnitTest
+  --offline --tests <7 M13 classes>`: BUILD SUCCESSFUL — 34/34 pass
+  (CheckpointWiring 3, NotificationIds 4, OutgoingTransfers 8,
+  ServiceOwnsBothDirections 5, TransferGraph 6, UiDestruction 3,
+  WidgetState 5), 0 failures/errors.
+- `.\gradlew.bat :app:testDebugUnitTest --offline` (FULL suite):
+  BUILD SUCCESSFUL — 33 classes, 246 tests, 0 skipped, 0 failures,
+  0 errors (212 pre-existing + 34 M13).
+- `.\gradlew.bat :app:assembleDebug --offline`: BUILD SUCCESSFUL
+  (37 tasks; only frozen AGP compileSdk-36 + SDK-XML notices). APK rebuilt
+  with bound-service manifest + widget descriptor.
+- Windows suite not re-run in this audit (zero Windows files in diff;
+  prior M13 evidence 260/260 stands; no M14 started).
+
+## 4. Limitations (explicit, not inferred)
+- JVM + loopback tests prove graph ownership, idempotence, isolation, and
+  cleanup of the app code — they do NOT prove Android OS service behavior
+  (process survival after swipe-away, FGS start timeouts, Doze/App Standby
+  deferral, OEM kills). The service path (start/bind/foreground) is
+  compile-verified + manifest-declared, NOT OS-verified.
+- Emulator tests: NOT RUN. Physical-device tests: NOT RUN. The
+  startService/bind/onDestroy path needs a device run (remains M16 per
+  directive); not labeled verified.
+- STOP after M13. M14 NOT started. No Android Studio/emulator requirement
+  introduced.
+
+# M14 Appendix -- Windows System Tray Integration (2026-10-10)
+
+## Status: CLOSED (automated evidence green; interactive tray NOT RUN),
+## M15 NOT started
+
+### 0. Requirements confirmed before editing (authoritative specs read first)
+- Master Spec v1.2 milestone table: "M14 Windows Tray: System tray and
+  quick actions." UI/UX v1.0 §12: tray icon mandatory for quick access +
+  long-running transfers; menu Open LocalDrop / Active Transfers /
+  Nearby Devices-Send / Exit; indicator may reflect active transfer state
+  but real state only. M01 `TrayManager` placeholder frozen menu
+  (Open/Active-Transfers/Exit) is a subset — implemented the full §12 set.
+- Inspected: App.xaml(.cs) startup/shutdown, MainWindow (+xaml),
+  SendController (cancel/dispose), TransferCoordinator, discovery/control/
+  auth/checkpoint lifecycle, m06/m07/m13 ADRs, prior log. No Android or
+  protocol-schema change required (none made).
+
+### 1. Scope and files changed (Windows only; uncommitted user work preserved)
+- NEW `Infrastructure/TrayPolicy.cs`: pure menu model (4 §12 items in
+  order, Open default), close-vs-exit policy, busy-gated exit confirmation
+  text, real-state-only tooltip/status text. Zero UI references.
+- NEW `Infrastructure/WindowsTrayIcon.cs`: thin WinForms NotifyIcon
+  adapter (production-only): 4-item menu + double-click restore, tooltip
+  refresh, Dispose hides icon first (no ghost), detaches menu/handlers.
+- NEW `LocalDrop.Protocol.Tests/TrayPolicyTests.cs`: 16 headless tests.
+- NEW `docs/architecture/m14-tray-decisions.md` (7 ADRs).
+- MOD `LocalDrop.csproj`: `UseWindowsForms=true` (in-box, offline-safe) +
+  `<Using Remove="System.Windows.Forms" />` (its CloseReason collided with
+  `LocalDrop.Network.CloseReason`; explicit using only in the adapter; no
+  transfer/security file touched).
+- MOD test csproj: link `Infrastructure/TrayPolicy.cs` only (adapter stays
+  app-side, like the MEL-backend exclusion pattern).
+- MOD `App.xaml`: `ShutdownMode="OnExplicitShutdown"`.
+- MOD `App.xaml.cs`: tray lifecycle (create after window, StateChanged
+  minimize->hide, Closing cancel->hide unless `_exitRequested`, menu
+  Open/Active/Send->restore / Exit->confirm-if-busy->Shutdown, tooltip
+  refresh on Send state, OnExit tray-first teardown). No new engines,
+  discovery, or workers (grep-verified: only the 2 pre-existing
+  constructions in StartLocalDrop remain).
+- `TrayManager.cs` placeholder + `MainWindow` untouched. No Android changes.
+
+### 2. Tray behavior and lifecycle decisions
+- Minimize button, [X], Alt+F4 all hide to tray (transfers untouched);
+  taskbar entry removed while hidden; restore via menu/double-click
+  (Show + Normal + ShowInTaskbar + Activate). Single-window app: all open
+  actions restore the main window (no new windows invented).
+- Exit ONLY via tray Exit; busy exit confirms with explicit cancellation
+  warning, idle exit is direct. Teardown: tray -> Send.Dispose (cooperative
+  cancel) -> discovery StopAsync (3 s bound) -> identity dispose, all
+  idempotent + null-guarded. SystemIcons.Application icon (no invented
+  assets); tooltip truncated to 63 chars; all callbacks exception-guarded.
+- Ownership preserved: tray reads SendController state, never drives
+  transfers; M05/M10/M11/M12/offline behavior untouched (no engine,
+  auth, checkpoint, hash, session, socket, or protocol change).
+
+### 3. Test and build evidence (sequential, exact commands)
+- `dotnet build windows/LocalDrop.sln -c Debug` -> exit 0. 0 errors;
+  only the frozen NU1903 x2 warnings. (First attempt failed with 8
+  CS0104/CS0535 CloseReason collisions from the implicit WinForms using;
+  fixed via Using-Remove, no logic file touched — reported, not hidden.)
+- `dotnet test LocalDrop.Protocol.Tests.csproj -c Debug --filter
+  TrayPolicyTests` -> Passed 16/16, 0 failed.
+- `dotnet test windows/LocalDrop.sln -c Debug` (FULL) -> Passed 276/276,
+  0 failed, 0 skipped (260 pre-existing + 16 new), first run, no flakes,
+  no weakened assertions.
+
+### 4. Regressions checked
+- Full Windows suite green (includes M05 auth, M10 resume, M11 SHA-256,
+  M12 isolation, M06/M07 transfer, SendController UI tests). Android
+  untouched (git status: Windows + docs + log only).
+
+### 5. Known limitations and unverified interactive behavior
+- Interactive tray verification: NOT RUN (headless environment — icon
+  rendering, menu clicks, minimize/restore animation, confirm dialog,
+  ghost-icon absence not physically observed). The adapter is thin by
+  design; policy is fully unit-tested.
+- Windows UI wires the SEND stack only (no receive UI exists yet):
+  "Active Transfers" restores the main send window; no fake receive state.
+- STOP after M14. M15 benchmarking NOT started. Nothing committed,
+  nothing discarded (all changes uncommitted in working tree).
