@@ -27,3 +27,6 @@ TestResults/
 # Temp
 tmp/
 temp/
+# Local tooling caches & editor
+.dotnet_home/
+.vscode/
