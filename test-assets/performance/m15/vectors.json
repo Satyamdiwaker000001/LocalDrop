@@ -1,0 +1,37 @@
+{
+  "spec": "m15-pattern-v1",
+  "chunkBytes": 1048576,
+  "cycleLcgMultiplier": 1103515245,
+  "cycleLcgIncrement": 12345,
+  "oracle": "python3 hashlib (OpenSSL)",
+  "sizes": [
+    {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 1048576,
+      "sha256": "54cb7aff23c6396c6a60e79357764d1356e052b98f7194a223461761917a8a28"
+    },
+    {
+      "bytes": 20000000,
+      "sha256": "c8c68fed5262c47924d61adc1bf075f9d441dd17a390898ddd2e66cfe178500c"
+    },
+    {
+      "bytes": 100000000,
+      "sha256": "da74eee95a7e4ab726e4727f33607e7349e522e3ff01416ac0e85771d76d85a8"
+    },
+    {
+      "bytes": 1000000000,
+      "sha256": "51741a9e4e52ba9d83203038c94ecf195a5e844fc60be0bfa820b874f3582b49"
+    },
+    {
+      "bytes": 5000000000,
+      "sha256": "dcb9792437b9b589b97b9b21778d4284d7069c4f2ccfabd756bd9b2256e797a7"
+    },
+    {
+      "bytes": 21474836480,
+      "sha256": "ed3ea33e7c6afb1d3e1f3a15c836f26b64f942ea79f13f1c6a2feb3dc21863fd"
+    }
+  ]
+}

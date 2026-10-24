@@ -302,9 +302,13 @@ public sealed class SendController : INotifyPropertyChanged, IDisposable
                 ProgressPercent = 100;
                 string avg = done.AverageBytesPerSec is > 0
                     ? $" at {FormatSpeed(done.AverageBytesPerSec.Value)}" : "";
-                ResultText = $"Completed — {source.DisplayName} sent to {peerName} " +
+                // TransportComplete is reported by the engine ONLY after the
+                // receiver confirms SHA-256 verification + finalization
+                // (VERIFY_RESULT match), so this text may say verified.
+                // Anything else is Failed/Cancelled.
+                ResultText = $"Completed — verified by receiver. {source.DisplayName} sent to {peerName} " +
                     $"({FormatBytes(done.BytesTransferred)}{avg}).";
-                StatusText = "Completed.";
+                StatusText = "Completed — verified.";
                 break;
             case TransferOutcome.Cancelled:
                 Phase = SendPhase.Cancelled;

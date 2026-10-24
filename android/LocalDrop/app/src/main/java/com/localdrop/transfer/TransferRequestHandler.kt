@@ -15,7 +15,9 @@ import com.localdrop.protocol.TypedPayload
 // destination viable. Replies TRANSFER_ACCEPT (registers the pending transfer
 // and starts the data wait) or TRANSFER_REJECT with a frozen M02 error code.
 // TRANSFER_COMPLETE / CANCEL / ERROR for the active transfer are forwarded to
-// the engine; all other types are ignored here.
+// the engine; VERIFY_REQUEST is answered from the engine's verification
+// records (match requires hash equality AND successful finalization);
+// all other types are ignored here.
 class TransferRequestHandler(private val engine: ReceiverEngine) : ControlChannelListener {
     override fun onMessage(connection: ControlConnection, message: LocalDropMessage) {
         when (message.type) {
@@ -26,6 +28,10 @@ class TransferRequestHandler(private val engine: ReceiverEngine) : ControlChanne
             MessageType.TRANSFER_COMPLETE -> {
                 val done = message.payload as? TypedPayload.TransferComplete ?: return
                 engine.handleTransferComplete(connection, done.v)
+            }
+            MessageType.VERIFY_REQUEST -> {
+                val verify = message.payload as? TypedPayload.VerifyRequest ?: return
+                engine.handleVerifyRequest(connection, verify.v.transferId, verify.v.sha256Hex)
             }
             MessageType.CANCEL -> {
                 val cancel = message.payload as? TypedPayload.Cancel ?: return

@@ -75,10 +75,19 @@ class SenderEngineTest {
 
     // Minimal receiver stand-in. Control side replies ACCEPT/REJECT to the
     // one TRANSFER_REQUEST and records everything the sender emits
-    // (START/PROGRESS/COMPLETE/CANCEL/ERROR). Data side captures one
-    // connection (preamble + bytes). throttleMsPerRead simulates a slow
-    // receiver/disk for backpressure tests.
-    class FakeReceiver(val accept: Boolean = true, val throttleMsPerRead: Long = 0L) {
+    // (START/PROGRESS/COMPLETE/CANCEL/ERROR/VERIFY_REQUEST). Data side
+    // captures one connection (preamble + bytes). throttleMsPerRead
+    // simulates a slow receiver/disk for backpressure tests. verifyMode
+    // scripts the VERIFY verdict: Match answers match=true with the
+    // COMPLETE sha (a correct receiver), Mismatch answers match=false,
+    // Silent never answers (engines must time out, never succeed).
+    enum class VerifyMode { Match, Mismatch, Silent }
+
+    class FakeReceiver(
+        val accept: Boolean = true,
+        val throttleMsPerRead: Long = 0L,
+        val verifyMode: VerifyMode = VerifyMode.Match
+    ) {
         val receivedControl = LinkedBlockingQueue<LocalDropMessage>()
         val dataServer = ServerSocket(0)
         val actualDataPort: Int = dataServer.localPort
@@ -128,6 +137,21 @@ class SenderEngineTest {
                     }
                     c.send(reply)
                 }
+                if (m.type == MessageType.VERIFY_REQUEST) {
+                    val req = (m.payload as TypedPayload.VerifyRequest).v
+                    if (verifyMode != VerifyMode.Silent) {
+                        val match = verifyMode == VerifyMode.Match
+                        c.send(
+                            LocalDropMessage(
+                                MessageType.VERIFY_RESULT, newId(), null, null, req.transferId,
+                                TypedPayload.VerifyResult(
+                                    com.localdrop.protocol.VerifyResultPayload(
+                                        req.transferId, match, req.sha256Hex)
+                                )
+                            )
+                        )
+                    }
+                }
             }
 
             override fun onClosed(c: ControlConnection, r: CloseReason, d: String) {}
@@ -173,11 +197,13 @@ class SenderEngineTest {
     private fun harness(
         accept: Boolean = true,
         requestTimeoutMs: Long = 8000L,
-        throttleMsPerRead: Long = 0L
+        throttleMsPerRead: Long = 0L,
+        verifyMode: VerifyMode = VerifyMode.Match,
+        verifyTimeoutMs: Long = 8000L
     ): Harness {
         val senderDevice = DeviceInfo(senderId, "PhoneA", "android")
         val receiverDevice = DeviceInfo(receiverId, "PcB", "windows")
-        val fake = FakeReceiver(accept, throttleMsPerRead)
+        val fake = FakeReceiver(accept, throttleMsPerRead, verifyMode)
         val controlServer = ControlServer(
             receiverDevice, port = 0, listenerFactory = { fake.controlListener }
         )
@@ -193,6 +219,7 @@ class SenderEngineTest {
             mailbox = senderMailbox,
             dataPort = fake.actualDataPort,
             requestTimeoutMs = requestTimeoutMs,
+            verifyTimeoutMs = verifyTimeoutMs,
             logger = null
         )
         return Harness(controlServer, senderControl, senderMailbox, fake, engine, progress)

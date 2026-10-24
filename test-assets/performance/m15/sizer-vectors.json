@@ -1,0 +1,545 @@
+{
+  "spec": "m15-sizer-equivalence-v1",
+  "minBytes": 65536,
+  "maxBytes": 1048576,
+  "initialBytes": 262144,
+  "cooldownMs": 2000,
+  "consecutiveWindows": 3,
+  "growthRatio": 1.2,
+  "shrinkRatio": 0.5,
+  "oracle": "python3 independent re-implementation of the documented M06 rules",
+  "scenarios": [
+    {
+      "name": "steady-fast-growth-to-max",
+      "fileSizeBytes": 100000000,
+      "steps": [
+        {
+          "advanceMs": 0,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 0,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 0,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 2500,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 0,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 0,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 0,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 2500,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 0,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 0,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 0,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 2500,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        }
+      ],
+      "expectedBlockSizes": [
+        262144,
+        262144,
+        262144,
+        262144,
+        524288,
+        524288,
+        524288,
+        524288,
+        1048576,
+        1048576,
+        1048576,
+        1048576,
+        1048576
+      ],
+      "expectedHistory": [
+        "grow 262144->524288 windowBps=262144000",
+        "grow 524288->1048576 windowBps=262144000"
+      ]
+    },
+    {
+      "name": "stalled-shrink-to-min",
+      "fileSizeBytes": 100000000,
+      "steps": [
+        {
+          "advanceMs": 0,
+          "blockBytes": 65536,
+          "elapsedNanos": 600000000,
+          "stalled": true
+        },
+        {
+          "advanceMs": 0,
+          "blockBytes": 65536,
+          "elapsedNanos": 600000000,
+          "stalled": true
+        },
+        {
+          "advanceMs": 2500,
+          "blockBytes": 65536,
+          "elapsedNanos": 600000000,
+          "stalled": true
+        },
+        {
+          "advanceMs": 2500,
+          "blockBytes": 65536,
+          "elapsedNanos": 600000000,
+          "stalled": true
+        },
+        {
+          "advanceMs": 2500,
+          "blockBytes": 65536,
+          "elapsedNanos": 600000000,
+          "stalled": true
+        },
+        {
+          "advanceMs": 2500,
+          "blockBytes": 65536,
+          "elapsedNanos": 600000000,
+          "stalled": true
+        }
+      ],
+      "expectedBlockSizes": [
+        262144,
+        262144,
+        262144,
+        131072,
+        131072,
+        131072,
+        65536
+      ],
+      "expectedHistory": [
+        "shrink 262144->131072 windowBps=109226",
+        "shrink 131072->65536 windowBps=109226"
+      ]
+    },
+    {
+      "name": "alternating-never-oscillates",
+      "fileSizeBytes": 100000000,
+      "steps": [
+        {
+          "advanceMs": 1000,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 1000,
+          "blockBytes": 65536,
+          "elapsedNanos": 600000000,
+          "stalled": true
+        },
+        {
+          "advanceMs": 1000,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 1000,
+          "blockBytes": 65536,
+          "elapsedNanos": 600000000,
+          "stalled": true
+        },
+        {
+          "advanceMs": 1000,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 1000,
+          "blockBytes": 65536,
+          "elapsedNanos": 600000000,
+          "stalled": true
+        },
+        {
+          "advanceMs": 1000,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 1000,
+          "blockBytes": 65536,
+          "elapsedNanos": 600000000,
+          "stalled": true
+        },
+        {
+          "advanceMs": 1000,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 1000,
+          "blockBytes": 65536,
+          "elapsedNanos": 600000000,
+          "stalled": true
+        },
+        {
+          "advanceMs": 1000,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 1000,
+          "blockBytes": 65536,
+          "elapsedNanos": 600000000,
+          "stalled": true
+        },
+        {
+          "advanceMs": 1000,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 1000,
+          "blockBytes": 65536,
+          "elapsedNanos": 600000000,
+          "stalled": true
+        },
+        {
+          "advanceMs": 1000,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 1000,
+          "blockBytes": 65536,
+          "elapsedNanos": 600000000,
+          "stalled": true
+        },
+        {
+          "advanceMs": 1000,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 1000,
+          "blockBytes": 65536,
+          "elapsedNanos": 600000000,
+          "stalled": true
+        },
+        {
+          "advanceMs": 1000,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 1000,
+          "blockBytes": 65536,
+          "elapsedNanos": 600000000,
+          "stalled": true
+        }
+      ],
+      "expectedBlockSizes": [
+        262144,
+        262144,
+        262144,
+        262144,
+        262144,
+        262144,
+        262144,
+        262144,
+        262144,
+        262144,
+        262144,
+        262144,
+        262144,
+        262144,
+        262144,
+        262144,
+        262144,
+        262144,
+        262144,
+        262144,
+        262144
+      ],
+      "expectedHistory": []
+    },
+    {
+      "name": "shrink-disarms-regrowth-until-improvement",
+      "fileSizeBytes": 100000000,
+      "steps": [
+        {
+          "advanceMs": 0,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 0,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 0,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 2500,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 0,
+          "blockBytes": 65536,
+          "elapsedNanos": 600000000,
+          "stalled": true
+        },
+        {
+          "advanceMs": 0,
+          "blockBytes": 65536,
+          "elapsedNanos": 600000000,
+          "stalled": true
+        },
+        {
+          "advanceMs": 2500,
+          "blockBytes": 65536,
+          "elapsedNanos": 600000000,
+          "stalled": true
+        },
+        {
+          "advanceMs": 2500,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 2500,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 2500,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 2500,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 2500,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 2500,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 2500,
+          "blockBytes": 262144,
+          "elapsedNanos": 500000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 2500,
+          "blockBytes": 262144,
+          "elapsedNanos": 500000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 2500,
+          "blockBytes": 262144,
+          "elapsedNanos": 500000,
+          "stalled": false
+        }
+      ],
+      "expectedBlockSizes": [
+        262144,
+        262144,
+        262144,
+        262144,
+        524288,
+        524288,
+        524288,
+        262144,
+        262144,
+        262144,
+        262144,
+        262144,
+        262144,
+        262144,
+        524288,
+        524288,
+        524288
+      ],
+      "expectedHistory": [
+        "grow 262144->524288 windowBps=262144000",
+        "shrink 524288->262144 windowBps=109226",
+        "grow 262144->524288 windowBps=524288000"
+      ]
+    },
+    {
+      "name": "zero-byte-file-stays-at-min",
+      "fileSizeBytes": 0,
+      "steps": [
+        {
+          "advanceMs": 0,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 0,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 0,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 0,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 0,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 0,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        }
+      ],
+      "expectedBlockSizes": [
+        65536,
+        65536,
+        65536,
+        65536,
+        65536,
+        65536,
+        65536
+      ],
+      "expectedHistory": []
+    },
+    {
+      "name": "tiny-file-starts-at-min",
+      "fileSizeBytes": 100,
+      "steps": [
+        {
+          "advanceMs": 0,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 0,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 0,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 0,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 0,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        },
+        {
+          "advanceMs": 0,
+          "blockBytes": 262144,
+          "elapsedNanos": 1000000,
+          "stalled": false
+        }
+      ],
+      "expectedBlockSizes": [
+        65536,
+        65536,
+        65536,
+        65536,
+        65536,
+        65536,
+        65536
+      ],
+      "expectedHistory": []
+    }
+  ]
+}

@@ -132,6 +132,22 @@ class ReceiverEngine(
     // `<name>.localdrop-part` contract is preserved whenever uncontended.
     private val reservedTemps = mutableSetOf<String>()
     private val MAX_CONCURRENT_TRANSFERS = 4
+    // Per-transfer verification records (audit verify-gating): the verdict
+    // the sender's VERIFY_REQUEST gets — content-hash match AND successful
+    // finalization, plus the peer the record belongs to. Bounded against
+    // hostile peers (oldest evicted); late/duplicate VERIFY_REQUESTs are
+    // answered from here without touching live state.
+    private val verifiedRecords = LinkedHashMap<String, VerifiedRecord>()
+
+    // match=true means BOTH hashes matched AND the file finalized. Anything
+    // else (mismatch, hash failure, commit failure) is match=false: the
+    // sender must never report success for it.
+    data class VerifiedRecord(
+        val transferId: String,
+        val peerDeviceId: String,
+        val match: Boolean,
+        val computedSha256Hex: String
+    )
 
     companion object {
         // Cap for unmatched TRANSFER_COMPLETE frames (see earlyCompletes).
@@ -279,6 +295,141 @@ class ReceiverEngine(
     }
 
     // ---- control-plane entry points (called by TransferRequestHandler) ----
+
+    // Records a terminal verification verdict for later VERIFY_REQUESTs.
+    // Gate-guarded, bounded (oldest evicted past the cap).
+    private fun recordVerification(record: VerifiedRecord) {
+        synchronized(gate) {
+            verifiedRecords.remove(record.transferId)
+            verifiedRecords[record.transferId] = record
+            while (verifiedRecords.size > AppConfig.MAX_VERIFY_RECORDS) {
+                val oldest = verifiedRecords.keys.firstOrNull() ?: break
+                verifiedRecords.remove(oldest)
+            }
+        }
+    }
+
+    // Answers one VERIFY_REQUEST on the sender's control connection.
+    // Immediate when the verdict is already recorded; otherwise (transfer
+    // still hashing/finalizing) a bounded daemon worker awaits the terminal
+    // outcome OFF the control read thread, then answers. Unknown ids and
+    // peer mismatches fail closed with ERROR (never a forged match).
+    internal fun handleVerifyRequest(control: ControlConnection, transferId: String, sha256Hex: String) {
+        val requestPeer = try { auth.verifiedPeer(control)?.deviceId } catch (e: Exception) { null }
+        if (requestPeer == null) {
+            replyTransferError(control, transferId, ErrorCode.PAIRING_REQUIRED, "Authentication required.")
+            return
+        }
+        val recorded = synchronized(gate) { verifiedRecords[transferId] }
+        if (recorded != null) {
+            if (recorded.peerDeviceId != requestPeer) {
+                replyTransferError(control, transferId, ErrorCode.TRANSFER_REJECTED, "Not authorized for this transfer.")
+                return
+            }
+            val match = recorded.match && recorded.computedSha256Hex.equals(sha256Hex, ignoreCase = true)
+            replyVerifyResult(control, transferId, match, recorded.computedSha256Hex)
+            return
+        }
+        val livePeer: String? = synchronized(gate) {
+            actives[transferId]?.peerDeviceId ?: pendings[transferId]?.peerDeviceId
+        }
+        if (livePeer == null) {
+            replyTransferError(control, transferId, ErrorCode.INVALID_PROTOCOL, "Unknown transfer.")
+            return
+        }
+        if (livePeer != requestPeer) {
+            replyTransferError(control, transferId, ErrorCode.TRANSFER_REJECTED, "Not authorized for this transfer.")
+            return
+        }
+        Thread({
+            // Wait for the VERIFICATION RECORD, not for the terminal outcome.
+            // The record is written on every verification path and is never
+            // removed when another consumer takes the outcome, while the
+            // terminal map entry IS owned by whoever consumes the outcome.
+            // Depending on the terminal entry here made the answer depend on
+            // an unrelated consumer's timing: a polled outcome consumer could
+            // delete the entry first, and the sender then saw a false
+            // verification timeout for a transfer whose bytes were received
+            // and verified byte-exactly.
+            // M15: the wait scales with the file size (the verification
+            // re-reads the finished file from storage), so a large transfer
+            // is not answered with a spurious timeout.
+            val fileSize = synchronized(gate) {
+                actives[transferId]?.metadata?.fileSize ?: pendings[transferId]?.metadata?.fileSize ?: 0L
+            }
+            val (late, decided) = awaitVerificationVerdict(
+                transferId, AppConfig.transferVerifyTimeoutMsFor(fileSize))
+            if (late != null && late.peerDeviceId == requestPeer) {
+                val match = late.match && late.computedSha256Hex.equals(sha256Hex, ignoreCase = true)
+                replyVerifyResult(control, transferId, match, late.computedSha256Hex)
+            } else {
+                replyTransferError(control, transferId, ErrorCode.TIMEOUT,
+                    "Transfer did not complete verification.")
+            }
+        }, "localdrop-verify-${transferId.take(8)}").apply { isDaemon = true; start() }
+    }
+
+    // Waits for the verification verdict of a transfer WITHOUT consuming any
+    // outcome. The verification RECORD is the authoritative signal (it is
+    // written on every verification path and is not removed when another
+    // consumer takes the terminal outcome). A transfer decided before the
+    // verification stage (destination I/O failure, cancel) has no record;
+    // the terminal outcome then answers as a failure as soon as it is
+    // decided.
+    private fun awaitVerificationVerdict(
+        transferId: String, timeoutMs: Long
+    ): Pair<VerifiedRecord?, Boolean> {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (true) {
+            val record = synchronized(gate) { verifiedRecords[transferId] }
+            if (record != null) return Pair(record, true)
+            val decided = synchronized(waitGate) { terminal.containsKey(transferId) }
+            if (decided) return Pair(null, true)
+            if (System.currentTimeMillis() >= deadline) return Pair(null, false)
+            try {
+                Thread.sleep(50)
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return Pair(null, false)
+            }
+        }
+    }
+
+    private fun replyVerifyResult(
+        control: ControlConnection, transferId: String, match: Boolean, computedSha: String
+    ) {
+        try {
+            control.send(
+                LocalDropMessage(
+                    type = MessageType.VERIFY_RESULT,
+                    messageId = ProtocolCodec.newMessageId(),
+                    correlationId = null, sessionId = null, transferId = transferId,
+                    payload = TypedPayload.VerifyResult(
+                        com.localdrop.protocol.VerifyResultPayload(transferId, match, computedSha)
+                    )
+                )
+            )
+        } catch (e: Exception) {
+            // Best effort; the sender treats a missing verdict as failure.
+        }
+    }
+
+    private fun replyTransferError(
+        control: ControlConnection, transferId: String, code: ErrorCode, detail: String
+    ) {
+        try {
+            control.send(
+                LocalDropMessage(
+                    type = MessageType.ERROR,
+                    messageId = ProtocolCodec.newMessageId(),
+                    correlationId = null, sessionId = null, transferId = transferId,
+                    payload = TypedPayload.Error(ErrorPayload(ProtocolError(code, detail), null))
+                )
+            )
+        } catch (e: Exception) {
+            // Best effort.
+        }
+    }
 
     internal fun handleTransferRequest(control: ControlConnection, metadata: TransferMetadata) {
         // 1. Authenticated channel? (M05 mandatory.)
@@ -749,6 +900,7 @@ class ReceiverEngine(
         val expectedSha = done.sha256Hex.lowercase()
         if (expectedSha == SenderEngine.M06_HASH_NOT_COMPUTED) {
             val (code, detail) = TransferErrors.protocolViolation("SHA-256 hash not provided (M11 required).")
+            recordVerification(VerifiedRecord(metadata.transferId, active.peerDeviceId, false, SenderEngine.M06_HASH_NOT_COMPUTED))
             failActive(active, code, detail)
             return
         }
@@ -770,6 +922,7 @@ class ReceiverEngine(
             computedSha = hasher.digest().joinToString("") { "%02x".format(it) }.lowercase()
         } catch (e: Exception) {
             val (code, detail) = TransferErrors.destinationUnavailable("Failed to verify SHA-256: ${e.message}")
+            recordVerification(VerifiedRecord(metadata.transferId, active.peerDeviceId, false, SenderEngine.M06_HASH_NOT_COMPUTED))
             failActive(active, code, detail)
             return
         }
@@ -777,6 +930,7 @@ class ReceiverEngine(
             val (code, detail) = TransferErrors.protocolViolation("SHA-256 mismatch. Expected $expectedSha, got $computedSha")
             try { destination.deleteTempQuietly(active.tempFile) } catch (e: Exception) { }
             try { checkpoints?.clearCheckpoint(metadata.transferId) } catch (e: Exception) { }
+            recordVerification(VerifiedRecord(metadata.transferId, active.peerDeviceId, false, computedSha))
             failActive(active, code, detail)
             return
         }
@@ -805,8 +959,13 @@ class ReceiverEngine(
                 }
                 destination.finalize(active.tempFile, final)
                 try { checkpoints?.clearCheckpoint(active.transferId) } catch (e: Exception) { }
+                // Verified AND finalized: the only state that may answer
+                // VERIFY_RESULT with match=true.
+                recordVerification(VerifiedRecord(active.transferId, active.peerDeviceId, true, computedSha))
             } catch (e: Exception) {
                 val (code, detail) = TransferErrors.destinationWriteFailed(e.message ?: "finalize failed")
+                // Content matched but the commit failed: NOT verified success.
+                recordVerification(VerifiedRecord(active.transferId, active.peerDeviceId, false, computedSha))
                 completeActiveClaimed(
                     active, TransferOutcome.Failed(active.transferId, code, detail))
                 try {

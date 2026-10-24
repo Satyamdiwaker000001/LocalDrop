@@ -58,8 +58,9 @@ import com.localdrop.transfer.TransferSource
 // dispatch user actions ONLY: no sockets, no file I/O, no crypto, no
 // orchestration here (UI/UX Spec §18). All transfer work runs service-side
 // (OutgoingTransfers worker threads + coordinators); progress and outcomes
-// are real engine events. No fake Verified state (M11 owns integrity
-// verification).
+// are real engine events. Success is shown only for receiver-verified
+// completion (VERIFY_RESULT match + finalization); anything else lands in
+// Failed/Cancelled — never presented as success.
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -405,7 +406,10 @@ private fun SendScreen(stack: MainActivity.AppStack, ui: com.localdrop.transfer.
         Text(ui.statusText, style = MaterialTheme.typography.bodyMedium)
         if (ui.resultText.isNotEmpty()) Text(ui.resultText)
         if (ui.phase == SendPhase.Succeeded) {
-            Text("Integrity verification arrives in a later update (M11).",
+            // Accurate: TransportComplete reaches Succeeded ONLY after the
+            // receiver confirms SHA-256 verification + finalization. Failed
+            // or unconfirmed transfers never land here (Failed/Cancelled).
+            Text("Verified by the receiver (SHA-256 match).",
                 style = MaterialTheme.typography.bodySmall)
         }
     }

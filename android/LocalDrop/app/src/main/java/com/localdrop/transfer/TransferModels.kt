@@ -5,9 +5,10 @@ import com.localdrop.protocol.LocalDropMessage
 import com.localdrop.protocol.TypedPayload
 
 // M06 transfer models. State wires reuse the exact M01 TRANSFER_STATES
-// strings (UI/UX Spec §13); "completed" means TRANSPORT-complete only —
-// verification (and any verified state) belongs to M11. All sizes/offsets
-// are Long (ADR 12); no Int appears in any size path.
+// strings (UI/UX Spec §13); "completed" is reported to the UI only after
+// the receiver confirms SHA-256 verification + finalization (VERIFY_RESULT
+// match) — bytes on the wire alone never count as success. All
+// sizes/offsets are Long (ADR 12); no Int appears in any size path.
 
 // Existing protocol vocabulary, reused verbatim.
 enum class TransferEngineState(val wire: String) {
@@ -110,6 +111,9 @@ object TransferErrors {
 
 // Extracts the transferId from any transfer-scoped M02 message (null for
 // non-transfer types). Used by mailboxes to route control-plane responses.
+// ERROR carries its scope on the envelope: a transferId routes to that
+// transfer's queue (so VERIFY/REQUEST verdicts and other per-transfer
+// failures are awaitable); a missing one stays unscoped as before.
 fun transferIdOf(message: LocalDropMessage): String? = when (val p = message.payload) {
     is TypedPayload.TransferRequest -> p.v.metadata.transferId
     is TypedPayload.TransferAccept -> p.v.transferId
@@ -124,6 +128,6 @@ fun transferIdOf(message: LocalDropMessage): String? = when (val p = message.pay
     is TypedPayload.TransferComplete -> p.v.transferId
     is TypedPayload.VerifyRequest -> p.v.transferId
     is TypedPayload.VerifyResult -> p.v.transferId
-    is TypedPayload.Error -> null
+    is TypedPayload.Error -> message.transferId
     else -> null
 }

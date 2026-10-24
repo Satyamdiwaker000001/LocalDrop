@@ -112,6 +112,43 @@ object AppConfig {
     // is rejected without parsing (see data-transfer.md).
     const val DATA_PREAMBLE_MAX_BYTES = 64
 
+    // Audit verify-gating (frozen VERIFY_REQUEST/VERIFY_RESULT contract, no
+    // protocol change): the sender reports TransportComplete only after the
+    // receiver confirms hash verification + finalization. Upper bound for
+    // the receiver's VERIFY_RESULT after TRANSFER_COMPLETE — covers hashing
+    // + commit of large files on slow storage. Changing it needs no
+    // protocol change (never on the wire).
+    const val TRANSFER_VERIFY_TIMEOUT_MS: Long = 60000L
+    // Upper bound for the sender's VERIFY wait slices (cancellation check
+    // granularity during the verify wait; not a protocol value).
+    const val TRANSFER_VERIFY_POLL_MS: Long = 500L
+    // M15: lower bound on the receiver-side verification throughput, used
+    // ONLY to size the wait for the receiver's VERIFY_RESULT. The receiver
+    // re-reads the finished file from storage to compute SHA-256, so that
+    // pass scales with the file size; a FIXED verification timeout turns a
+    // large (10 GiB+) transfer into a FALSE failure (measured by the M15
+    // benchmark: a 20 GiB transfer on ordinary storage needs more than the
+    // fixed 60 s). 8 MiB/s is a deliberately conservative floor, below the
+    // 37 MB/s product reference target. This is a TIMEOUT, never a cap: it
+    // does not limit the file size, the transfer rate or the block size.
+    const val TRANSFER_VERIFY_MIN_BYTES_PER_SECOND: Long = 8L * 1024 * 1024
+
+    // Upper bound for the VERIFY_RESULT wait, scaled by the transferred
+    // size. The floor (TRANSFER_VERIFY_TIMEOUT_MS) still applies to small
+    // transfers.
+    fun transferVerifyTimeoutMsFor(fileSizeBytes: Long): Long {
+        val floor = TRANSFER_VERIFY_TIMEOUT_MS
+        if (fileSizeBytes <= 0L) return floor
+        val seconds = fileSizeBytes / TRANSFER_VERIFY_MIN_BYTES_PER_SECOND
+        if (seconds > (Long.MAX_VALUE - floor) / 1000L) return Long.MAX_VALUE
+        val scaled = seconds * 1000L
+        return if (scaled > floor) scaled else floor
+    }
+    // Cap for per-transfer verification records kept for late/duplicate
+    // VERIFY_REQUESTs (match + computed hash; small, bounded against
+    // hostile peers; oldest evicted).
+    const val MAX_VERIFY_RECORDS = 64
+
     // M13 service-owned graph (docs/architecture/m13-service-decisions.md).
     // Notification channel for transfer notifications.
     const val NOTIFICATION_CHANNEL_ID = "localdrop_transfers"

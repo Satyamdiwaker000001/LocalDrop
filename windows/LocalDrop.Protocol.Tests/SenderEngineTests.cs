@@ -63,13 +63,19 @@ public sealed class SenderEngineTests
 
     // Minimal receiver stand-in. Control side replies ACCEPT/REJECT to the one
     // TRANSFER_REQUEST and records everything the sender emits
-    // (START/PROGRESS/COMPLETE/CANCEL/ERROR). Data side captures one
-    // connection (preamble + bytes). throttleMsPerRead simulates a slow
-    // receiver/disk for backpressure tests.
+    // (START/PROGRESS/COMPLETE/CANCEL/ERROR/VERIFY_REQUEST). Data side
+    // captures one connection (preamble + bytes). throttleMsPerRead simulates
+    // a slow receiver/disk for backpressure tests. VerifyMode scripts the
+    // VERIFY verdict: Match answers match=true with the request sha (a
+    // correct receiver), Mismatch answers match=false, Silent never answers
+    // (engines must time out, never succeed).
+    internal enum VerifyMode { Match, Mismatch, Silent }
+
     private sealed class FakeReceiver : IDisposable
     {
         private readonly bool _accept;
         private readonly int _throttleMsPerRead;
+        private readonly VerifyMode _verifyMode;
         public readonly ConcurrentQueue<LocalDropMessage> ReceivedControl = new();
         public readonly TcpListener DataListener;
         public int ActualDataPort => ((IPEndPoint)DataListener.LocalEndpoint).Port;
@@ -79,10 +85,11 @@ public sealed class SenderEngineTests
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly Task _dataTask;
 
-        public FakeReceiver(bool accept = true, int throttleMsPerRead = 0)
+        public FakeReceiver(bool accept = true, int throttleMsPerRead = 0, VerifyMode verifyMode = VerifyMode.Match)
         {
             _accept = accept;
             _throttleMsPerRead = throttleMsPerRead;
+            _verifyMode = verifyMode;
             DataListener = new TcpListener(IPAddress.Loopback, 0);
             DataListener.Start();
             _dataTask = Task.Run(DataLoopAsync);
@@ -150,6 +157,20 @@ public sealed class SenderEngineTests
                                     new ProtocolError(ErrorCode.TRANSFER_REJECTED, "Nope."))));
                     _ = connection.SendAsync(reply);
                 }
+                if (message.Type == MessageType.VERIFY_REQUEST &&
+                    message.Payload is TypedPayload.VerifyRequest verify)
+                {
+                    if (parent._verifyMode != VerifyMode.Silent)
+                    {
+                        _ = connection.SendAsync(new LocalDropMessage(
+                            MessageType.VERIFY_RESULT, ProtocolCodec.NewMessageId(),
+                            null, null, verify.V.TransferId,
+                            new TypedPayload.VerifyResult(new VerifyResultPayload(
+                                verify.V.TransferId,
+                                parent._verifyMode == VerifyMode.Match,
+                                verify.V.Sha256Hex))));
+                    }
+                }
             }
 
             public void OnClosed(ControlConnection connection, CloseReason reason, string detail) { }
@@ -180,11 +201,12 @@ public sealed class SenderEngineTests
     }
 
     private static Harness CreateHarness(
-        bool accept = true, int requestTimeoutMs = 8000, int throttleMsPerRead = 0)
+        bool accept = true, int requestTimeoutMs = 8000, int throttleMsPerRead = 0,
+        VerifyMode verifyMode = VerifyMode.Match, int verifyTimeoutMs = 8000)
     {
         var senderDevice = new DeviceInfo(SenderId, "PcA", "windows");
         var receiverDevice = new DeviceInfo(ReceiverId, "PhoneB", "android");
-        var fake = new FakeReceiver(accept, throttleMsPerRead);
+        var fake = new FakeReceiver(accept, throttleMsPerRead, verifyMode);
         var server = new ControlServer(receiverDevice, port: 0, listenerFactory: () => fake.Listener);
         server.Start();
         var mailbox = new TransferMailbox();
@@ -194,7 +216,8 @@ public sealed class SenderEngineTests
         var progress = new ConcurrentQueue<TransferProgress>();
         var engine = new SenderEngine(
             SenderId, control, mailbox,
-            dataPort: fake.ActualDataPort, requestTimeoutMs: requestTimeoutMs);
+            dataPort: fake.ActualDataPort, requestTimeoutMs: requestTimeoutMs,
+            verifyTimeoutMs: verifyTimeoutMs);
         return new Harness
         {
             ControlServer = server,

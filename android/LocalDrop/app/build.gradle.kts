@@ -42,6 +42,10 @@ android {
     buildFeatures {
         compose = true
     }
+
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 dependencies {
@@ -59,4 +63,5 @@ dependencies {
     // M02 test-only: local JVM unit tests for the dependency-free protocol
     // package. No production dependency change.
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 }

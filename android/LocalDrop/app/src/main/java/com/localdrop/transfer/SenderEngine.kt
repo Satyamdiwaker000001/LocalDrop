@@ -37,6 +37,7 @@ class SenderEngine(
     private val requestTimeoutMs: Long = AppConfig.TRANSFER_REQUEST_TIMEOUT_MS.toLong(),
     private val dataConnectTimeoutMs: Int = AppConfig.DATA_CONNECT_TIMEOUT_MS,
     private val progressIntervalMs: Long = AppConfig.TRANSFER_PROGRESS_INTERVAL_MS,
+    private val verifyTimeoutMs: Long = AppConfig.TRANSFER_VERIFY_TIMEOUT_MS,
     private val logger: AppLogger? = null
 ) {
     data class SendRequest(
@@ -304,8 +305,8 @@ class SenderEngine(
             return fail(transferId, code, detail)
         }
         // 6. Transport completion: final progress + TRANSFER_COMPLETE with the
-        // M06 zeros sentinel (M02 shape satisfied; meaning documented in ADR
-        // 20 — explicitly NOT verification).
+        // real whole-stream SHA-256 (M11). Delivery of this frame is
+        // necessary but NOT sufficient for success — see step 7.
         val elapsedMs = (System.nanoTime() - startNanos) / 1_000_000L
         val average = if (elapsedMs > 0) transferred.toDouble() * 1000.0 / elapsedMs.toDouble() else null
         emitProgress(req, TransferEngineState.TRANSPORT_COMPLETE, transferred, total, elapsedMs, recentBps)
@@ -323,14 +324,93 @@ class SenderEngine(
         if (!control.send(complete)) {
             return fail(transferId, ErrorCode.NETWORK_LOST, "Completion signal lost.")
         }
-        log("transport-complete transfer=$transferId bytes=$transferred elapsedMs=$elapsedMs")
-        return TransferOutcome.TransportComplete(
-            transferId, transferred, elapsedMs, average,
-            TransferMetrics(
-                elapsedMs, transferred, average, readNanosTotal, writeNanosTotal,
-                stalls, sizer.history, sizer.currentBlockSize
+        // 7. Receiver verification gate (audit fix): TransportComplete is
+        // reported ONLY after the receiver confirms hash verification AND
+        // finalization via the frozen VERIFY_REQUEST/VERIFY_RESULT contract.
+        // Bytes on the wire are necessary but NOT sufficient for success.
+        return awaitReceiverVerification(req, transferId, transferred, sha256Hex, elapsedMs, average,
+            readNanosTotal, writeNanosTotal, stalls, sizer)
+    }
+
+    // Sends VERIFY_REQUEST and awaits the receiver's VERIFY_RESULT verdict.
+    // Fail-closed: mismatch, timeout, control loss, and receiver errors all
+    // map to Failed — never to success. Cancellation is polled in slices so
+    // a stuck verification does not hang teardown.
+    private fun awaitReceiverVerification(
+        req: SendRequest, transferId: String, transferred: Long, sha256Hex: String,
+        elapsedMs: Long, average: Double?, readNanosTotal: Long, writeNanosTotal: Long,
+        stalls: Long, sizer: AdaptiveBlockSizer
+    ): TransferOutcome {
+        val verify = LocalDropMessage(
+            type = MessageType.VERIFY_REQUEST,
+            messageId = ProtocolCodec.newMessageId(),
+            correlationId = null, sessionId = null, transferId = transferId,
+            payload = TypedPayload.VerifyRequest(
+                com.localdrop.protocol.VerifyRequestPayload(transferId, sha256Hex)
             )
         )
+        if (!control.send(verify)) {
+            return fail(transferId, ErrorCode.NETWORK_LOST,
+                "Sent $transferred bytes but the verification request could not be delivered.")
+        }
+        // M15: the wait scales with the transferred size. The receiver
+        // verifies by re-reading the finished file from storage, so a fixed
+        // timeout produced a FALSE failure for large files (measured: a
+        // 20 GiB transfer could not be verified inside the fixed 60 s).
+        val scaledVerifyTimeoutMs = maxOf(verifyTimeoutMs, AppConfig.transferVerifyTimeoutMsFor(transferred))
+        val deadline = System.currentTimeMillis() + scaledVerifyTimeoutMs
+        var verdict: LocalDropMessage? = null
+        while (verdict == null) {
+            if (req.isCancelled()) {
+                sendCancelBestEffort(transferId)
+                return TransferOutcome.Cancelled(transferId, transferred)
+            }
+            if (!control.isReady()) break
+            val remaining = deadline - System.currentTimeMillis()
+            if (remaining <= 0L) break
+            verdict = mailbox.awaitResponse(
+                transferId,
+                setOf(MessageType.VERIFY_RESULT, MessageType.ERROR),
+                minOf(remaining, AppConfig.TRANSFER_VERIFY_POLL_MS))
+        }
+        if (verdict == null) {
+            // Distinguish a dead channel from a slow verifier so the UI can
+            // say "bytes sent, unconfirmed" vs "connection lost".
+            return if (!control.isReady()) {
+                fail(transferId, ErrorCode.NETWORK_LOST,
+                    "Control lost during verification after sending $transferred bytes.")
+            } else {
+                fail(transferId, ErrorCode.TIMEOUT,
+                    "Sent $transferred bytes but the receiver did not confirm verification.")
+            }
+        }
+        when (verdict.type) {
+            MessageType.VERIFY_RESULT -> {
+                val result = (verdict.payload as? TypedPayload.VerifyResult)?.v
+                if (result == null || result.transferId != transferId) {
+                    return fail(transferId, ErrorCode.INVALID_PROTOCOL, "Mismatched VERIFY_RESULT.")
+                }
+                if (!result.match || !result.sha256Hex.equals(sha256Hex, ignoreCase = true)) {
+                    return fail(transferId, ErrorCode.CHECKSUM_MISMATCH,
+                        "Receiver reported SHA-256 mismatch. The file must not be treated as received.")
+                }
+                log("verified transfer=$transferId bytes=$transferred elapsedMs=$elapsedMs")
+                return TransferOutcome.TransportComplete(
+                    transferId, transferred, elapsedMs, average,
+                    TransferMetrics(
+                        elapsedMs, transferred, average, readNanosTotal, writeNanosTotal,
+                        stalls, sizer.history, sizer.currentBlockSize
+                    )
+                )
+            }
+            else -> {
+                val error = (verdict.payload as? TypedPayload.Error)?.v?.error
+                return TransferOutcome.Failed(
+                    transferId, error?.code ?: ErrorCode.INTERNAL_ERROR,
+                    error?.message ?: "Receiver verification failed."
+                )
+            }
+        }
     }
 
     private fun sendProgressBestEffort(transferId: String, transferred: Long, total: Long): Boolean {

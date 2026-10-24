@@ -24,6 +24,7 @@ public sealed class SenderEngine
     private readonly int _requestTimeoutMs;
     private readonly int _dataConnectTimeoutMs;
     private readonly long _progressIntervalMs;
+    private readonly int _verifyTimeoutMs;
 
     public sealed record SendRequest(
         ITransferSource Source,
@@ -43,7 +44,8 @@ public sealed class SenderEngine
         int dataPort = AppConfig.DataTcpPort,
         int requestTimeoutMs = AppConfig.TransferRequestTimeoutMs,
         int dataConnectTimeoutMs = AppConfig.DataConnectTimeoutMs,
-        long progressIntervalMs = AppConfig.TransferProgressIntervalMs)
+        long progressIntervalMs = AppConfig.TransferProgressIntervalMs,
+        int verifyTimeoutMs = AppConfig.TransferVerifyTimeoutMs)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(localDeviceId);
         ArgumentNullException.ThrowIfNull(control);
@@ -55,6 +57,7 @@ public sealed class SenderEngine
         _requestTimeoutMs = requestTimeoutMs;
         _dataConnectTimeoutMs = dataConnectTimeoutMs;
         _progressIntervalMs = progressIntervalMs;
+        _verifyTimeoutMs = verifyTimeoutMs;
     }
 
     public async Task<TransferOutcome> SendAsync(SendRequest req, CancellationToken ct = default)
@@ -390,8 +393,8 @@ public sealed class SenderEngine
             return Fail(transferId, code, detail);
         }
         // 6. Transport completion: final progress + TRANSFER_COMPLETE with the
-        // M06 zeros sentinel (M02 shape satisfied; meaning documented — M11
-        // owns verification; explicitly NOT verification).
+        // real whole-stream SHA-256 (M11). Delivery of this frame is
+        // necessary but NOT sufficient for success — see step 7.
         long elapsedMs = (NanoNow() - startNanos) / 1_000_000L;
         double? average = elapsedMs > 0 ? transferred * 1000.0 / elapsedMs : null;
         Emit(req, transferId, TransferEngineState.TRANSPORT_COMPLETE, transferred, total, elapsedMs, recentBps);
@@ -413,10 +416,95 @@ public sealed class SenderEngine
         }
         if (!completedSent)
             return Fail(transferId, ErrorCode.NETWORK_LOST, "Completion signal lost.");
-        return new TransferOutcome.TransportComplete(
-            transferId, transferred, elapsedMs, average,
-            new TransferMetrics(elapsedMs, transferred, average, readNanosTotal, writeNanosTotal,
-                stalls, [.. sizer.History], sizer.CurrentBlockSize));
+        // 7. Receiver verification gate (audit fix): TransportComplete is
+        // reported ONLY after the receiver confirms hash verification AND
+        // finalization via the frozen VERIFY_REQUEST/VERIFY_RESULT contract.
+        // Bytes on the wire are necessary but NOT sufficient for success.
+        return await AwaitReceiverVerificationAsync(
+            req, transferId, transferred, sha256Hex, elapsedMs, average,
+            readNanosTotal, writeNanosTotal, stalls, sizer, token);
+    }
+
+    // Sends VERIFY_REQUEST and awaits the receiver's VERIFY_RESULT verdict.
+    // Fail-closed: mismatch, timeout, control loss, and receiver errors all
+    // map to Failed — never to success. Cancellation is polled in slices so
+    // a stuck verification does not hang teardown.
+    private async Task<TransferOutcome> AwaitReceiverVerificationAsync(
+        SendRequest req, string transferId, long transferred, string sha256Hex,
+        long elapsedMs, double? average, long readNanosTotal, long writeNanosTotal,
+        long stalls, AdaptiveBlockSizer sizer, CancellationToken token)
+    {
+        var verify = new LocalDropMessage(
+            MessageType.VERIFY_REQUEST, ProtocolCodec.NewMessageId(),
+            null, null, transferId,
+            new TypedPayload.VerifyRequest(new VerifyRequestPayload(transferId, sha256Hex)));
+        bool verifySent;
+        try
+        {
+            verifySent = await _control.SendAsync(verify, token);
+        }
+        catch (OperationCanceledException)
+        {
+            await SendCancelBestEffortAsync(transferId);
+            return new TransferOutcome.Cancelled(transferId, transferred);
+        }
+        if (!verifySent)
+            return Fail(transferId, ErrorCode.NETWORK_LOST,
+                $"Sent {transferred} bytes but the verification request could not be delivered.");
+        long scaledVerifyTimeoutMs = Math.Max(_verifyTimeoutMs, AppConfig.TransferVerifyTimeoutMsFor(transferred));
+        long deadline = Environment.TickCount64 + scaledVerifyTimeoutMs;
+        LocalDropMessage? verdict = null;
+        while (verdict is null)
+        {
+            if (token.IsCancellationRequested)
+            {
+                await SendCancelBestEffortAsync(transferId);
+                return new TransferOutcome.Cancelled(transferId, transferred);
+            }
+            if (!_control.IsReady) break;
+            long remaining = deadline - Environment.TickCount64;
+            if (remaining <= 0) break;
+            int slice = (int)Math.Min(remaining, AppConfig.TransferVerifyPollMs);
+            try
+            {
+                verdict = await Task.Run(() => _mailbox.AwaitResponse(
+                    transferId,
+                    new HashSet<MessageType> { MessageType.VERIFY_RESULT, MessageType.ERROR },
+                    slice), token);
+            }
+            catch (OperationCanceledException)
+            {
+                await SendCancelBestEffortAsync(transferId);
+                return new TransferOutcome.Cancelled(transferId, transferred);
+            }
+        }
+        if (verdict is null)
+        {
+            // Distinguish a dead channel from a slow verifier so the UI can
+            // say "bytes sent, unconfirmed" vs "connection lost".
+            return !_control.IsReady
+                ? Fail(transferId, ErrorCode.NETWORK_LOST,
+                    $"Control lost during verification after sending {transferred} bytes.")
+                : Fail(transferId, ErrorCode.TIMEOUT,
+                    $"Sent {transferred} bytes but the receiver did not confirm verification.");
+        }
+        if (verdict.Payload is TypedPayload.VerifyResult result)
+        {
+            if (result.V.TransferId != transferId)
+                return Fail(transferId, ErrorCode.INVALID_PROTOCOL, "Mismatched VERIFY_RESULT.");
+            if (!result.V.Match ||
+                !string.Equals(result.V.Sha256Hex, sha256Hex, StringComparison.OrdinalIgnoreCase))
+                return Fail(transferId, ErrorCode.CHECKSUM_MISMATCH,
+                    "Receiver reported SHA-256 mismatch. The file must not be treated as received.");
+            return new TransferOutcome.TransportComplete(
+                transferId, transferred, elapsedMs, average,
+                new TransferMetrics(elapsedMs, transferred, average, readNanosTotal, writeNanosTotal,
+                    stalls, [.. sizer.History], sizer.CurrentBlockSize));
+        }
+        if (verdict.Payload is TypedPayload.Error error)
+            return new TransferOutcome.Failed(
+                transferId, error.V.Error.Code, error.V.Error.Message);
+        return Fail(transferId, ErrorCode.INVALID_PROTOCOL, "Unexpected verification response.");
     }
 
     private async Task SendCancelBestEffortAsync(string transferId)
