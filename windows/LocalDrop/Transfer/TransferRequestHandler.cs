@@ -30,6 +30,10 @@ public sealed class TransferRequestHandler : IControlEvents
                 if (message.Payload is TypedPayload.TransferComplete done)
                     _engine.HandleTransferComplete(connection, done.V);
                 break;
+            case MessageType.VERIFY_REQUEST:
+                if (message.Payload is TypedPayload.VerifyRequest verify)
+                    _engine.HandleVerifyRequest(connection, verify.V.TransferId, verify.V.Sha256Hex);
+                break;
             case MessageType.CANCEL:
                 if (message.Payload is TypedPayload.Cancel cancel)
                     _engine.HandleCancel(connection, cancel.V);

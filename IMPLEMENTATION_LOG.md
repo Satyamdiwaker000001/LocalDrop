@@ -1267,3 +1267,48 @@ Windows `ReceiverEngineTests` (20 tests) evidences the same matrix:
   "Active Transfers" restores the main send window; no fake receive state.
 - STOP after M14. M15 benchmarking NOT started. Nothing committed,
   nothing discarded (all changes uncommitted in working tree).
+
+# M15 Appendix — Performance Benchmark Verification & Closure Audit (2026-10-23)
+
+## Status: COMPLETED (PASS on Loopback TCP; physical Wi-Fi explicitly deferred to M16) — M16 NOT started
+
+### 1. Working Tree & ReceiverEngine.cs Recovery Investigation
+- `git reflog` & dangling object audit: Commit `ca56352` (M13/M14) was fast-forwarded to `045239d` (`HEAD`).
+- The uncommitted `windows/LocalDrop/Transfer/ReceiverEngine.cs` in the working tree contained null bytes from an aborted edit. `git checkout HEAD -- ReceiverEngine.cs` restored the clean baseline from `045239d`.
+- Verified against `TransferRequestHandler.cs` and `android/LocalDrop/app/src/main/java/com/localdrop/transfer/ReceiverEngine.kt`: verify-gating methods (`HandleVerifyRequest`, `RecordVerification`, `_verifiedRecords`, `AwaitVerificationVerdictAsync`) were present in Kotlin and in `TransferRequestHandler.cs`, but were uncommitted in Windows `ReceiverEngine.cs`.
+- Re-implemented the verify record and handler in `windows/LocalDrop/Transfer/ReceiverEngine.cs` to achieve exact parity with Android and pass all protocol tests.
+
+### 2. Protocol Handshake Gate Verification
+- Confirmed on both Windows (`SenderEngine.cs` / `ReceiverEngine.cs`) and Android (`SenderEngine.kt` / `ReceiverEngine.kt`):
+  1. The receiver verifies the completed file against expected SHA-256 by re-reading the written file from disk.
+  2. The receiver reports success only after verification and final rename succeed.
+  3. The sender awaits `VERIFY_RESULT` before emitting `TransportComplete`.
+  4. Disconnect during verification immediately returns `ErrorCode.NETWORK_LOST` (fixed early exit on `!_control.IsReady` / `!control.isReady()`).
+  5. Timeout, checksum mismatch, or malformed frames fail closed and never report false success.
+
+### 3. Build & Test Evidence
+- Windows:
+  - Latest build of `LocalDrop.Protocol.Tests.csproj` succeeded with 0 errors.
+  - `dotnet test ... --filter "FullyQualifiedName~M15SizerEquivalenceTests|FullyQualifiedName~M15VerifyRaceRegressionTests|FullyQualifiedName~VerifyHandshakeTests"`:
+    - `M15SizerEquivalenceTests`: 3/3 passed.
+    - `M15VerifyRaceRegressionTests`: 1/1 passed.
+    - `VerifyHandshakeTests`: 11/11 passed.
+    - Total: 15 passed, 0 failed, 0 skipped.
+- Android:
+  - `./gradlew.bat testDebugUnitTest --tests "com.localdrop.transfer.M15SizerEquivalenceTest" --tests "com.localdrop.transfer.M15VerifyRaceRegressionTest" --tests "com.localdrop.transfer.VerifyHandshakeTest"`:
+    - Total: 15 passed, 0 failed, 0 skipped.
+  - Fixes applied: Added `R` imports to widget providers, added test-only `org.json:json:20240303` to `build.gradle.kts` for JVM unit test execution, and fixed block advancement in `M15VerifyRaceRegressionTest.kt`.
+
+### 4. Benchmark Execution Results
+- Generated independent golden vectors with `test-assets/performance/m15/make_vectors.py` (Python 3 OpenSSL SHA-256).
+- Windows production loopback TCP suite (`M15BenchmarkTests.cs`):
+  - 0 B: 61 ms, exact match.
+  - 1 MiB: 63.5 ms, 16.52 MB/s wall, exact match.
+  - 100 MB: 1,034 ms, 96.70 MB/s wall, exact match.
+  - 5 GB (>4 GiB): 142,082 ms, 35.19 MB/s wall, 66.54 MiB/s transfer, exact match.
+  - 20 GiB (Acceptance): 455,774 ms, 47.12 MB/s wall, 69.33 MiB/s transfer, peak WS 33.7 MB, managed delta 12.08 MB, exact match.
+  - Concurrent (100 MB + 20 MB): 1,011 ms, 118.62 MB/s wall, both SHA-256 hashes verified simultaneously.
+- Results documented in `docs/performance/M15_BENCHMARK_RESULTS.md` and `test-assets/performance/m15/results/m15-windows-results.json`.
+
+### 5. Next Steps
+- STOP at M15. M16 has NOT been started.

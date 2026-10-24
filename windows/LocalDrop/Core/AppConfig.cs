@@ -120,4 +120,40 @@ public static class AppConfig
     // commit latency by orders of magnitude; pathological delays remain the
     // receiver's fail-closed domain).
     public const int TransferCommitLingerMs = 1000;
+
+    // Audit verify-gating (frozen VERIFY_REQUEST/VERIFY_RESULT contract, no
+    // protocol change): the sender reports TransportComplete only after the
+    // receiver confirms hash verification + finalization. Upper bound for
+    // the receiver's VERIFY_RESULT after TRANSFER_COMPLETE — covers hashing
+    // + commit of large files on slow storage. Never on the wire.
+    public const int TransferVerifyTimeoutMs = 60000;
+    // Sender VERIFY wait slice (cancellation check granularity; not a
+    // protocol value).
+    public const int TransferVerifyPollMs = 500;
+    // M15: lower bound on the receiver-side verification throughput, used
+    // ONLY to size the wait for the receiver's VERIFY_RESULT. The receiver
+    // re-reads the finished file from storage to compute SHA-256, so that
+    // pass scales with the file size; a FIXED verification timeout turns a
+    // large (10 GiB+) transfer into a FALSE failure (measured by the M15
+    // benchmark: a 20 GiB transfer on ordinary storage needs more than the
+    // fixed 60 s). 8 MiB/s is a deliberately conservative floor, below the
+    // 37 MB/s product reference target. This is a TIMEOUT, never a cap: it
+    // does not limit the file size, the transfer rate or the block size.
+    public const long TransferVerifyMinBytesPerSecond = 8L * 1024 * 1024;
+
+    // Upper bound for the VERIFY_RESULT wait, scaled by the transferred
+    // size. The floor (TransferVerifyTimeoutMs) still applies to small
+    // transfers.
+    public static long TransferVerifyTimeoutMsFor(long fileSizeBytes)
+    {
+        long floor = TransferVerifyTimeoutMs;
+        if (fileSizeBytes <= 0L) return floor;
+        long seconds = fileSizeBytes / TransferVerifyMinBytesPerSecond;
+        if (seconds > (long.MaxValue - floor) / 1000L) return long.MaxValue;
+        long scaled = seconds * 1000L;
+        return scaled > floor ? scaled : floor;
+    }
+    // Cap for per-transfer verification records kept for late/duplicate
+    // VERIFY_REQUESTs (match + computed hash; oldest evicted).
+    public const int MaxVerifyRecords = 64;
 }

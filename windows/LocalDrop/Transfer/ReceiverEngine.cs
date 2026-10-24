@@ -1,4 +1,4 @@
-﻿// M06 Windows receiver engine (ADRs 1-2, 9, 11, 13-18, 20-23). Receives one
+// M06 Windows receiver engine (ADRs 1-2, 9, 11, 13-18, 20-23). Receives one
 // file over a dedicated TCP data connection from an M05-authorized Android
 // sender. Requires: M04 control channel + M05 mutual auth + M05 authorized
 // session (all enforced here; the data socket additionally proves knowledge
@@ -58,6 +58,19 @@ public sealed class ReceiverEngine
     // MAX_EARLY_COMPLETES bound): a peer must not grow receiver memory with
     // unmatched frames. Entries for live transfers are always kept.
     private const int MaxEarlyCompletes = 16;
+    // Per-transfer verification records (audit verify-gating): the verdict
+    // the sender's VERIFY_REQUEST gets — content-hash match AND successful
+    // finalization, plus the peer the record belongs to. Bounded against
+    // hostile peers (oldest evicted); late/duplicate VERIFY_REQUESTs are
+    // answered from here without touching live state.
+    private readonly System.Collections.Generic.Dictionary<string, VerifiedRecord> _verifiedRecords = new();
+    private readonly System.Collections.Generic.List<string> _verifiedRecordOrder = new();
+
+    public sealed record VerifiedRecord(
+        string TransferId,
+        string PeerDeviceId,
+        bool Match,
+        string ComputedSha256Hex);
     
     public Action<TransferProgress>? Progress { get; set; }
 
@@ -429,6 +442,144 @@ public sealed class ReceiverEngine
             DeliverOutcome(cancel.TransferId,
                 new TransferOutcome.Cancelled(cancel.TransferId, 0L));
         }
+    }
+
+    private void RecordVerification(VerifiedRecord record)
+    {
+        lock (_gate)
+        {
+            if (_verifiedRecords.ContainsKey(record.TransferId))
+            {
+                _verifiedRecords[record.TransferId] = record;
+                return;
+            }
+            _verifiedRecords[record.TransferId] = record;
+            _verifiedRecordOrder.Add(record.TransferId);
+            while (_verifiedRecords.Count > AppConfig.MaxVerifyRecords)
+            {
+                if (_verifiedRecordOrder.Count == 0) break;
+                string oldest = _verifiedRecordOrder[0];
+                _verifiedRecordOrder.RemoveAt(0);
+                _verifiedRecords.Remove(oldest);
+            }
+        }
+    }
+
+    internal void HandleVerifyRequest(ControlConnection control, string transferId, string sha256Hex)
+    {
+        string? requestPeer = null;
+        try { requestPeer = _auth.VerifiedPeer(control)?.DeviceId; } catch { }
+        if (requestPeer is null)
+        {
+            ReplyTransferError(control, transferId, ErrorCode.PAIRING_REQUIRED, "Authentication required.");
+            return;
+        }
+        VerifiedRecord? recorded = null;
+        lock (_gate)
+        {
+            if (_verifiedRecords.TryGetValue(transferId, out var r)) recorded = r;
+        }
+        if (recorded is not null)
+        {
+            if (recorded.PeerDeviceId != requestPeer)
+            {
+                ReplyTransferError(control, transferId, ErrorCode.TRANSFER_REJECTED, "Not authorized for this transfer.");
+                return;
+            }
+            bool match = recorded.Match && string.Equals(recorded.ComputedSha256Hex, sha256Hex, StringComparison.OrdinalIgnoreCase);
+            ReplyVerifyResult(control, transferId, match, recorded.ComputedSha256Hex);
+            return;
+        }
+        string? livePeer = null;
+        long fileSize = 0L;
+        lock (_gate)
+        {
+            if (_actives.TryGetValue(transferId, out var a))
+            {
+                livePeer = a.PeerDeviceId;
+                fileSize = a.Metadata.FileSize;
+            }
+            else if (_pendings.TryGetValue(transferId, out var p))
+            {
+                livePeer = p.PeerDeviceId;
+                fileSize = p.Metadata.FileSize;
+            }
+        }
+        if (livePeer is null)
+        {
+            ReplyTransferError(control, transferId, ErrorCode.INVALID_PROTOCOL, "Unknown transfer.");
+            return;
+        }
+        if (livePeer != requestPeer)
+        {
+            ReplyTransferError(control, transferId, ErrorCode.TRANSFER_REJECTED, "Not authorized for this transfer.");
+            return;
+        }
+        _ = Task.Run(async () =>
+        {
+            long timeoutMs = AppConfig.TransferVerifyTimeoutMsFor(fileSize);
+            var (late, decided) = await AwaitVerificationVerdictAsync(transferId, timeoutMs);
+            if (late is not null && late.PeerDeviceId == requestPeer)
+            {
+                bool match = late.Match && string.Equals(late.ComputedSha256Hex, sha256Hex, StringComparison.OrdinalIgnoreCase);
+                ReplyVerifyResult(control, transferId, match, late.ComputedSha256Hex);
+            }
+            else
+            {
+                ReplyTransferError(control, transferId, ErrorCode.TIMEOUT, "Transfer did not complete verification.");
+            }
+        });
+    }
+
+    private async Task<(VerifiedRecord? Record, bool Decided)> AwaitVerificationVerdictAsync(
+        string transferId, long timeoutMs)
+    {
+        long deadline = Environment.TickCount64 + timeoutMs;
+        while (true)
+        {
+            lock (_gate)
+            {
+                if (_verifiedRecords.TryGetValue(transferId, out var r)) return (r, true);
+            }
+            bool decided;
+            lock (_waitGate)
+            {
+                decided = _terminal.ContainsKey(transferId);
+            }
+            if (decided) return (null, true);
+            if (Environment.TickCount64 >= deadline) return (null, false);
+            await Task.Delay(50);
+        }
+    }
+
+    private void ReplyVerifyResult(
+        ControlConnection control, string transferId, bool match, string computedSha)
+    {
+        try
+        {
+            var msg = new LocalDropMessage(
+                MessageType.VERIFY_RESULT,
+                ProtocolCodec.NewMessageId(),
+                null, null, transferId,
+                new TypedPayload.VerifyResult(new VerifyResultPayload(transferId, match, computedSha)));
+            _ = control.SendAsync(msg);
+        }
+        catch { }
+    }
+
+    private void ReplyTransferError(
+        ControlConnection control, string transferId, ErrorCode code, string detail)
+    {
+        try
+        {
+            var msg = new LocalDropMessage(
+                MessageType.ERROR,
+                ProtocolCodec.NewMessageId(),
+                null, null, transferId,
+                new TypedPayload.Error(new ErrorPayload(new ProtocolError(code, detail), null)));
+            _ = control.SendAsync(msg);
+        }
+        catch { }
     }
 
     internal void HandlePeerError(ControlConnection control, string? transferId, ProtocolError error)
@@ -859,6 +1010,7 @@ public sealed class ReceiverEngine
             if (expectedSha == SenderEngine.M07HashNotComputed)
             {
                 var (code, detail) = TransferErrors.ProtocolViolation("SHA-256 hash not provided (M11 required).");
+                RecordVerification(new VerifiedRecord(metadata.TransferId, active.PeerDeviceId, false, SenderEngine.M07HashNotComputed));
                 await FailActiveAsync(active, (code, detail));
                 return;
             }
@@ -880,6 +1032,7 @@ public sealed class ReceiverEngine
             catch (Exception ex)
             {
                 var (code, detail) = TransferErrors.DestinationUnavailable("Failed to verify SHA-256: " + ex.Message);
+                RecordVerification(new VerifiedRecord(metadata.TransferId, active.PeerDeviceId, false, SenderEngine.M07HashNotComputed));
                 await FailActiveAsync(active, (code, detail));
                 return;
             }
@@ -889,6 +1042,7 @@ public sealed class ReceiverEngine
                 var (code, detail) = TransferErrors.ProtocolViolation($"SHA-256 mismatch. Expected {expectedSha}, got {computedSha}");
                 DeleteTempQuietly(tempPath, _logger, metadata.TransferId);
                 _checkpoints?.ClearCheckpoint(metadata.TransferId);
+                RecordVerification(new VerifiedRecord(metadata.TransferId, active.PeerDeviceId, false, computedSha));
                 await FailActiveAsync(active, (code, detail));
                 return;
             }
@@ -924,10 +1078,12 @@ public sealed class ReceiverEngine
                     }
                     File.Move(active.TempPath, active.FinalPath, overwrite: false);
                     _checkpoints?.ClearCheckpoint(metadata.TransferId);
+                    RecordVerification(new VerifiedRecord(active.TransferId, active.PeerDeviceId, true, computedSha));
                 }
                 catch (Exception ex)
                 {
                     var (code, detail) = TransferErrors.DestinationWriteFailed(ex.Message);
+                    RecordVerification(new VerifiedRecord(active.TransferId, active.PeerDeviceId, false, computedSha));
                     CompleteActive(active, new TransferOutcome.Failed(active.TransferId, code, detail));
                     _logger?.TransactionEvent("failed", active.TransferId, active.PeerDeviceId,
                         $"code={ErrorCodes.ToWire(code)}");

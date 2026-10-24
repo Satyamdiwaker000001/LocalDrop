@@ -125,6 +125,9 @@ public static class TransferErrors
 
 // Extracts the transferId from any transfer-scoped M02 message (null for
 // non-transfer types). Used by mailboxes to route control-plane responses.
+// ERROR carries its scope on the envelope: a transferId routes to that
+// transfer's queue (so VERIFY verdicts and other per-transfer failures are
+// awaitable); a missing one stays unscoped as before.
 public static class TransferIds
 {
     public static string? Of(LocalDropMessage message) => message.Payload switch
@@ -142,6 +145,7 @@ public static class TransferIds
         TypedPayload.TransferComplete p => p.V.TransferId,
         TypedPayload.VerifyRequest p => p.V.TransferId,
         TypedPayload.VerifyResult p => p.V.TransferId,
+        TypedPayload.Error => message.TransferId,
         _ => null,
     };
 }

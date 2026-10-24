@@ -215,9 +215,14 @@ class SendUiController(
                         " at ${formatSpeed(outcome.averageBytesPerSec)}" else ""
                     state.copy(
                         phase = SendPhase.Succeeded, busy = false, progressPercent = 100.0,
-                        resultText = "Completed — ${src.displayName} sent to $peerName " +
+                        // TransportComplete is reported by the engine ONLY after
+                        // the receiver confirms SHA-256 verification +
+                        // finalization (VERIFY_RESULT match), so this text may
+                        // say verified. Anything else is Failed/Cancelled.
+                        resultText = "Completed — verified by receiver. " +
+                            "${src.displayName} sent to $peerName " +
                             "(${formatBytes(outcome.bytesTransferred)}$avg).",
-                        statusText = "Completed.")
+                        statusText = "Completed — verified.")
                 }
                 is TransferOutcome.Cancelled -> state.copy(
                     phase = SendPhase.Cancelled, busy = false,
